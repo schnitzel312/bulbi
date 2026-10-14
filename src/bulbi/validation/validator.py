@@ -15,9 +15,11 @@ from bulbi.validation.rules import (
     DenyEqualsAllowRule,
     DockerSocketMountRule,
     EmptyAllowlistRule,
+    GitScanBudgetRule,
     HostWithoutPortRule,
     IdleTimeoutRule,
     InterpreterToolsRule,
+    IsolatedGitRule,
     KnownToolsRule,
     MountsPresentRule,
     OpenNetworkRule,
@@ -69,6 +71,8 @@ class SpecValidator:
                 ResourceLimitsRule(),
                 IdleTimeoutRule(),
                 InterpreterToolsRule(),
+                GitScanBudgetRule(),
+                IsolatedGitRule(project),
             ]
         )
 

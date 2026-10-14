@@ -312,3 +312,37 @@ def test_malformed_idle_timeout_is_an_error():
     assert result.errors == [
         "box.idle_timeout must look like '0', '30s', '10m' or '1h', got 'soon'"
     ]
+
+
+# ---- [git] (docs/specs/git-safety.md) ----------------------------------------------------
+
+
+def test_malformed_git_scan_budget_is_an_error():
+    from bulbi.spec import GitSpec
+
+    result = validate_spec(_make_spec(git=GitSpec(scan_budget="forever")))
+    assert result.errors == [
+        "git.scan_budget must look like '0', '30s', '10m' or '1h', got 'forever'"
+    ]
+
+
+def test_isolated_git_needs_git_in_the_image_and_a_repository(tmp_path):
+    from bulbi.project import Project
+    from bulbi.spec import GitModeKind, GitSpec
+
+    spec = _make_spec(tools=ToolsSpec(allow=["python@3.12"]), git=GitSpec(GitModeKind.ISOLATED))
+    validator = SpecValidator.default(ToolRegistry.builtin(), Project.plain(tmp_path))
+    assert validator.validate(spec).errors == [
+        '[git] mode = "isolated" needs "git" in [tools] allow',
+        '[git] mode = "isolated" needs a git repository with a .git directory',
+    ]
+
+
+def test_isolated_git_in_a_repository_with_git_is_valid(tmp_path):
+    from bulbi.project import ProjectLocator
+    from bulbi.spec import GitModeKind, GitSpec
+    from tests.repos import make_repo
+
+    project = ProjectLocator().locate(make_repo(tmp_path / "app"))
+    validator = SpecValidator.default(ToolRegistry.builtin(), project)
+    assert validator.validate(_make_spec(git=GitSpec(GitModeKind.ISOLATED))).ok

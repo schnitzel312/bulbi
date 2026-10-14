@@ -8,6 +8,7 @@ from bulbi.validation.rules.filesystem import (
     DockerSocketMountRule,
     WorktreeDirsRule,
 )
+from bulbi.validation.rules.git import GitScanBudgetRule, IsolatedGitRule
 from bulbi.validation.rules.limits import ResourceLimitsRule
 from bulbi.validation.rules.mounts import MountsPresentRule, WritableMountRule
 from bulbi.validation.rules.network import (
@@ -29,9 +30,11 @@ __all__ = [
     "DenyEqualsAllowRule",
     "DockerSocketMountRule",
     "EmptyAllowlistRule",
+    "GitScanBudgetRule",
     "HostWithoutPortRule",
     "IdleTimeoutRule",
     "InterpreterToolsRule",
+    "IsolatedGitRule",
     "KnownToolsRule",
     "MountsPresentRule",
     "OpenNetworkRule",
