@@ -25,10 +25,13 @@ from bulbi.project.locator import Project
 from bulbi.spec import BulbiSpec, MountSpec
 
 PROJECT_MOUNT_PATH = "."
+GIT_POINTER_FILE = ".git"
 MASK_SOURCE = "/dev/null"
 # Entries that may sit next to worktrees without making their parent "mixed".
 _IGNORABLE_ENTRIES = frozenset({".DS_Store"})
-_PROTECTED_GIT_FILES = ("config", "config.worktree")
+# Files git follows to find the config it obeys: a writable one lets the agent point git
+# at a config it controls (core.fsmonitor, core.hooksPath, ...) and run code on the host.
+_PROTECTED_GIT_FILES = ("config", "config.worktree", "commondir", "gitdir")
 _HOOKS_DIR = "hooks"
 
 
@@ -124,9 +127,11 @@ class MountPlanner:
         if not any(mount.path == PROJECT_MOUNT_PATH for mount in spec.mounts):
             return
         for checkout in self._checkouts():
-            spec_file = checkout / SPEC_FILENAME
-            if spec_file.is_file():
-                yield BindMount(str(spec_file), str(spec_file), read_only=True)
+            for name in (SPEC_FILENAME, GIT_POINTER_FILE):
+                path = checkout / name
+                # A linked worktree's `.git` is a file pointing at its admin dir.
+                if path.is_file():
+                    yield BindMount(str(path), str(path), read_only=True)
         git_dir = self._project.git_dir
         if git_dir is None:
             return

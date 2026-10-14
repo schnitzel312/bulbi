@@ -350,3 +350,13 @@ def test_remove_network_retries_while_an_endpoint_is_still_detaching():
     network.remove = flaky_remove  # type: ignore[method-assign]
     GatewayManager(client, clock=lambda: 0.0, sleep=lambda _: None).remove_network(network.id)
     assert network.removed and len(attempts) == 3
+
+
+def test_worktree_git_pointers_are_read_only_review_b1(tmp_path, repo):
+    """Review B1 vectors A and B: a writable worktree `.git` file or admin `commondir` /
+    `gitdir` lets the agent repoint git at a config it controls (host code execution)."""
+    wt = add_worktree(repo, tmp_path / "worktrees" / "app" / "wt", "wt")
+    admin = repo / ".git" / "worktrees" / "wt"
+    binds = _binds(MountPlanner(_project(repo)).plan(_spec()))
+    for path in (wt / ".git", admin / "commondir", admin / "gitdir"):
+        assert (str(path), str(path), True) in binds, path
