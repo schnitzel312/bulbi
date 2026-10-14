@@ -456,6 +456,16 @@ def test_scan_budget_is_respected(repo):
     assert "scan_budget" in report.refusal()
 
 
+def test_the_baseline_is_complete_whatever_the_budget(repo):
+    """An incomplete baseline would make every later scan flag what it missed."""
+    nested = make_repo(repo / "vendor" / "lib")
+    ticks = iter(range(0, 10_000, 5))
+    guard = _start_box(_project(repo), GitSpec(scan_budget="1s"), clock=lambda: next(ticks))
+    baseline = BaselineStore(baseline_path(repo / ".bulbi")).load()
+    assert nested / ".git" in baseline.snapshot.entries
+    assert not guard.scan().complete
+
+
 def test_findings_are_audited(repo, tmp_path):
     guard = _start_box(_project(repo))
     nested = _plant_fsmonitor_repo(repo / "src", tmp_path / "PWNED")

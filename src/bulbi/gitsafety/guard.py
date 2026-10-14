@@ -151,7 +151,7 @@ class GitGuard:
         self, roots: Sequence[Path], protected: Sequence[Path], common_dir: Path | None
     ) -> GitBaseline:
         """Snapshot what the box is about to be able to write (at box creation)."""
-        snapshot = self._inventory.take(roots, common_dir)
+        snapshot = self._inventory.take(roots, common_dir, bounded=False)
         baseline = GitBaseline(tuple(roots), tuple(protected), common_dir, snapshot)
         self._baselines.save(baseline)
         return baseline
@@ -178,7 +178,7 @@ class GitGuard:
         record = self.quarantine.restore(record_id)
         baseline = self._baselines.load()
         if baseline is not None:
-            fresh = self._inventory.take(baseline.roots, baseline.common_dir)
+            fresh = self._inventory.take(baseline.roots, baseline.common_dir, bounded=False)
             restored = [item.original for item in record.items]
             self._baselines.save(baseline.accepting(fresh, restored))
         return record

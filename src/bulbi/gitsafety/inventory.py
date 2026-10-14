@@ -120,8 +120,13 @@ class GitInventory:
         self._clock = clock
         self._deadline: float | None = None
 
-    def take(self, roots: Sequence[Path], common_dir: Path | None = None) -> GitSnapshot:
-        self._deadline = None if self._budget is None else self._clock() + self._budget
+    def take(
+        self, roots: Sequence[Path], common_dir: Path | None = None, *, bounded: bool = True
+    ) -> GitSnapshot:
+        """Snapshot ``roots``; ``bounded=False`` ignores the budget (a baseline must be whole)."""
+        self._deadline = None
+        if bounded and self._budget is not None:
+            self._deadline = self._clock() + self._budget
         entries: dict[Path, GitEntry] = {}
         admin_dirs: dict[Path, AdminDir] = {}
         configs: dict[Path, ConfigState] = {}
