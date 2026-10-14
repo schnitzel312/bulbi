@@ -13,7 +13,8 @@ _HASH_LENGTH = 16
 
 
 class SpecHasher:
-    """Hashes everything that shapes a box: images, mounts, network, limits, agent, idling.
+    """Hashes everything that shapes a box: images, mounts, network, limits, agent, idling
+    and the git mode.
 
     Mount *configuration* counts (paths, modes, excludes, which checkouts are mounted),
     but not which files currently match an exclude: a new ``.env`` must not make an
@@ -35,6 +36,7 @@ class SpecHasher:
             "checkouts": [str(root) for root in checkout_roots],
             "network": [spec.network.default, spec.network.allow, spec.network.deny],
             "limits": [spec.limits.cpu, spec.limits.memory],
+            "git": spec.git.mode.value,
         }
         encoded = json.dumps(inputs, sort_keys=True).encode()
         return hashlib.sha256(encoded).hexdigest()[:_HASH_LENGTH]

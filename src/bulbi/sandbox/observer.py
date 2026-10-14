@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from bulbi.gitsafety.guard import GitSafetyReport
 from bulbi.spec import BulbiSpec
 
 
@@ -21,3 +22,6 @@ class SandboxObserver:
 
     def running(self, label: str, command: Sequence[str]) -> None:
         """``command`` is about to run in the box; ``label`` says what it is for."""
+
+    def git_report(self, report: GitSafetyReport) -> None:
+        """A git safety scan ran (before an attach or after a session)."""

@@ -18,14 +18,22 @@ from bulbi.agents import Agent, BoxContext
 from bulbi.container.gateway import GatewayManager, RunningGateway, SandboxNetwork
 from bulbi.container.identity import BoxIdentity
 from bulbi.container.manager import BoxLaunch, BoxManager, ContainerState, RunningBox
-from bulbi.container.mounts import PROJECT_MOUNT_PATH, MountPlanner
+from bulbi.container.mounts import (
+    PROJECT_MOUNT_PATH,
+    GitMetadataMounts,
+    MountPlanner,
+    host_exposure,
+)
 from bulbi.container.sessions import SessionTracker
 from bulbi.container.terminal import TerminalExec
-from bulbi.errors import SandboxError
+from bulbi.errors import GitSafetyError, SandboxError
 from bulbi.gateway.audit import audit_log_path
 from bulbi.gateway.config import GatewayConfig, HostAccess
 from bulbi.gateway.policy import NetworkPolicy
 from bulbi.gateway.relay import relay_ports
+from bulbi.gitsafety.guard import GitGuard
+from bulbi.gitsafety.isolated import BoxClones
+from bulbi.gitsafety.modes import GitModes
 from bulbi.image import ImageBuilder
 from bulbi.image.entrypoint import ATTACH_MARKER_PATH
 from bulbi.image.gateway import GatewayImageBuilder
@@ -42,9 +50,10 @@ from bulbi.secrets import (
     SecretReaders,
     user_declarations,
 )
-from bulbi.spec import BulbiSpec
+from bulbi.spec import BulbiSpec, GitSpec
 
-MountPlannerFactory = Callable[[Project], MountPlanner]
+MountPlannerFactory = Callable[[Project, GitMetadataMounts], MountPlanner]
+GitGuardFactory = Callable[[GitSpec, Path, Path, str | None], GitGuard]
 LockFactory = Callable[[Path], BoxLock]
 RelayLauncherFactory = Callable[[Path], RelayLauncher]
 
@@ -72,6 +81,9 @@ class SandboxServices:
     log_owner: tuple[int, int] | None = None
     planner: BoxPlanner = field(default_factory=BoxPlanner)
     hasher: SpecHasher = field(default_factory=SpecHasher)
+    git_modes: GitModes = field(default_factory=GitModes.builtin)
+    git_guard_factory: GitGuardFactory = GitGuard.for_project
+    git_clones: BoxClones | None = None
 
 
 class BoxOrchestrator:
@@ -92,7 +104,13 @@ class BoxOrchestrator:
         self._services = services
         self._observer = observer or SandboxObserver()
         self.identity = BoxIdentity(project.key, spec.box.name, profile)
-        self._planner = services.mount_planner_factory(project)
+        self._git_mode = services.git_modes.create(
+            spec.git.mode, project, self.identity, services.git_clones
+        )
+        self._planner = services.mount_planner_factory(project, self._git_mode.metadata_mounts())
+        self.git_guard = services.git_guard_factory(
+            spec.git, project.root, self.state_dir, profile
+        )
         self._secrets: list[ResolvedSecret] = []
 
     @property
@@ -141,6 +159,7 @@ class BoxOrchestrator:
             self._services.gateways.reap(self._services.boxes.list_containers())
             observation = self._observe()
             plan = self._services.planner.plan(observation, spec_hash)
+            self._guard_git(refuse=True)
             box = self._apply(plan, observation, policy, box_image, gateway_image, spec_hash)
             # Under the lock: tell the idle watcher a session is about to attach.
             box.handle.exec(["touch", ATTACH_MARKER_PATH])
@@ -150,8 +169,10 @@ class BoxOrchestrator:
             return box
 
     def release(self) -> None:
-        """After a session ends: with nobody left and ``idle_timeout = 0``, stop everything."""
+        """After a session ends: scan the git metadata it may have planted (git-safety
+        §2.2), then, with nobody left and ``idle_timeout = 0``, stop everything."""
         with self._services.lock_factory(self.state_dir).hold():
+            self._guard_git(refuse=False)
             box = self._services.boxes.find(self.identity.name)
             if box is None or self._services.sessions.active_sessions(box.id):
                 return
@@ -176,6 +197,18 @@ class BoxOrchestrator:
         with self._services.lock_factory(self.state_dir).hold():
             self._remove_all()
         return self.ensure()
+
+    # ---- git safety --------------------------------------------------------------------
+
+    def _guard_git(self, *, refuse: bool) -> None:
+        """Scan against the baseline and act on findings; before an attach, refuse if
+        anything dangerous is left in place."""
+        report = self.git_guard.scan()
+        if report is None:
+            return
+        self._observer.git_report(report)
+        if refuse and report.blocks_attach:
+            raise GitSafetyError(report.refusal())
 
     # ---- plans -------------------------------------------------------------------------
 
@@ -202,11 +235,12 @@ class BoxOrchestrator:
             assert observation.box is not None
             box = self._services.boxes.attach(observation.box.id)
             self._ensure_relay(policy)
+            self._git_mode.attach(box_image, box.handle)
             self._agent.refresh(box.handle, self.context)
             return box
         if plan is BoxPlan.START:
             assert observation.box is not None and observation.gateway is not None
-            return self._start_existing(observation.box, observation.gateway, policy)
+            return self._start_existing(observation.box, observation.gateway, policy, box_image)
         if plan is BoxPlan.RECREATE:
             self._remove_all()
         return self._create(policy, box_image, gateway_image, spec_hash)
@@ -227,13 +261,19 @@ class BoxOrchestrator:
                 rollback.callback(relay.stop)
             self._observer.starting_container()
             context = self.context
+            mounts = self._planner.plan(self._spec)
+            self._git_mode.provision(box_image)
+            exposure = host_exposure(mounts)
+            self.git_guard.record_baseline(
+                exposure.writable, exposure.protected, self._project.git_dir
+            )
             box = services.boxes.create(
                 BoxLaunch(
                     identity=self.identity,
                     spec=self._spec,
                     image_tag=box_image,
                     spec_hash=spec_hash,
-                    mounts=self._planner.plan(self._spec),
+                    mounts=mounts,
                     environment=context.environment,
                     gateway_id=gateway.id,
                     project_root=self._project.root,
@@ -246,7 +286,7 @@ class BoxOrchestrator:
         return box
 
     def _start_existing(
-        self, box: ContainerState, gateway: ContainerState, policy: NetworkPolicy
+        self, box: ContainerState, gateway: ContainerState, policy: NetworkPolicy, image: str
     ) -> RunningBox:
         """Stopped box, same spec: gateway first, then the box, then prepare again."""
         services = self._services
@@ -261,6 +301,7 @@ class BoxOrchestrator:
         services.gateways.wait_ready(running_gateway)
         self._start_relay(policy, network, running_gateway)
         self._observer.starting_container()
+        self._git_mode.provision(image)
         started = services.boxes.start(box.id)
         self._agent.prepare_container(started.handle, self.context)
         return started

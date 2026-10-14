@@ -642,3 +642,114 @@ def test_every_ensure_touches_the_attach_marker_review_minor_2(tmp_path, client,
     _orchestrator(project, services).ensure()
     touches = [argv for argv, _ in box.exec_calls if argv[:1] == ["touch"]]
     assert touches == [["touch", "/home/bulbi/.bulbi-attached"]] * 2
+
+
+# ---- Git safety (docs/specs/git-safety.md) ------------------------------------------------
+
+
+class GitObserver(RecordingObserver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reports: list = []
+
+    def git_report(self, report):
+        self.reports.append(report)
+
+
+def _git_spec(**git) -> BulbiSpec:
+    from bulbi.spec import GitSpec
+
+    return replace(_spec(), git=GitSpec(**git))
+
+
+def _plant_nested_repo(repo: Path) -> Path:
+    nested = make_repo(repo / "src")
+    (nested / ".git" / "config").write_text("[core]\n\tfsmonitor = /tmp/pwn.sh\n")
+    return nested
+
+
+def test_creating_a_box_records_the_git_baseline(services, repo):
+    from bulbi.gitsafety.baseline import BaselineStore, baseline_path
+
+    _orchestrator(ProjectLocator().locate(repo), services).ensure()
+    baseline = BaselineStore(baseline_path(repo / ".bulbi")).load()
+    assert baseline is not None
+    assert baseline.roots == (repo,)
+    assert repo / ".git" / "hooks" in baseline.protected
+    assert repo / ".bulbi" in baseline.protected
+    assert repo / ".git" in baseline.snapshot.entries
+
+
+def test_attach_quarantines_planted_git_metadata_first(services, repo):
+    _orchestrator(ProjectLocator().locate(repo), services).ensure()
+    nested = _plant_nested_repo(repo)
+    observer = GitObserver()
+    _orchestrator(ProjectLocator().locate(repo), services, observer=observer).ensure()
+    (report,) = observer.reports
+    assert [f.path for f in report.findings] == [nested / ".git"]
+    assert not (nested / ".git").exists()
+
+
+def test_block_policy_refuses_to_attach_and_changes_nothing(services, repo):
+    from bulbi.errors import GitSafetyError
+
+    spec = _git_spec(on_finding="block")
+    _orchestrator(ProjectLocator().locate(repo), services, spec=spec).ensure()
+    nested = _plant_nested_repo(repo)
+    with pytest.raises(GitSafetyError, match="refusing to attach"):
+        _orchestrator(ProjectLocator().locate(repo), services, spec=spec).ensure()
+    assert (nested / ".git").is_dir()
+
+
+def test_session_end_scans_for_planted_git_metadata(client, services, repo):
+    observer = GitObserver()
+    orchestrator = _orchestrator(ProjectLocator().locate(repo), services, observer=observer)
+    with SandboxSession(orchestrator, services, observer):
+        nested = _plant_nested_repo(repo)
+    assert not (nested / ".git").exists()
+    assert [len(report.findings) for report in observer.reports] == [1]
+
+
+def test_recreating_scans_against_the_old_baseline_before_recording_a_new_one(services, repo):
+    _orchestrator(ProjectLocator().locate(repo), services).ensure()
+    nested = _plant_nested_repo(repo)
+    _orchestrator(ProjectLocator().locate(repo), services, spec=_spec(idle="5m")).ensure()
+    assert not (nested / ".git").exists()
+
+
+def test_isolated_mode_seeds_a_clone_volume_and_mounts_it(tmp_path, client, services, repo):
+    from bulbi.container.gitvolume import GitVolumeManager
+    from bulbi.gitsafety.isolated import BoxClones
+
+    wt = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
+    services = replace(services, git_clones=BoxClones(GitVolumeManager(client)))
+    orchestrator = _orchestrator(
+        ProjectLocator().locate(wt), services, spec=_git_spec(mode="isolated")
+    )
+    orchestrator.ensure()
+    volume = orchestrator.identity.git_volume_name
+    assert volume in client.volumes.by_name
+    (seed,) = client.helper_runs
+    assert seed["command"][-2:] == ["wt", str(wt)]
+    seed_mounts = {(m["Target"], m["Source"], m["ReadOnly"]) for m in seed["mounts"]}
+    assert ("/bulbi/host", str(repo / ".git"), True) in seed_mounts
+    (box,) = [
+        kw for _, kw in client.containers.run_calls if kw.get("name") == orchestrator.identity.name
+    ]
+    box_mounts = {m["Target"]: m for m in box["mounts"]}
+    assert box_mounts[str(repo / ".git")]["Type"] == "volume"
+    assert not any(t.startswith(f"{repo / '.git'}/") for t in box_mounts)
+
+
+def test_isolated_mode_without_docker_volumes_is_an_error(tmp_path, services, repo):
+    with pytest.raises(SandboxError, match="isolated"):
+        _orchestrator(ProjectLocator().locate(repo), services, spec=_git_spec(mode="isolated"))
+
+
+def test_git_mode_is_part_of_the_spec_hash():
+    from bulbi.sandbox.hashing import SpecHasher
+
+    hasher = SpecHasher()
+    guarded = hasher.hash(_git_spec(), "b", "g", [])
+    assert guarded != hasher.hash(_git_spec(mode="isolated"), "b", "g", [])
+    assert guarded == hasher.hash(_git_spec(on_finding="block"), "b", "g", [])
