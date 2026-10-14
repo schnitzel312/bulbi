@@ -39,7 +39,7 @@ class GitBaseline:
     Attributes:
         roots: Host directories the box can write (the read-write mounts).
         protected: Host paths inside ``roots`` the box cannot write (read-only overlays,
-            masks, the isolated clone's volume); changes there are the user's own.
+            masks, the isolated box repo's volume); changes there are the user's own.
         common_dir: The project's shared git directory, if it is a repository.
         snapshot: The git metadata found at box creation.
     """

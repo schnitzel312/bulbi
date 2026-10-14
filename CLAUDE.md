@@ -36,7 +36,7 @@ bulbi stop | restart            # stop the project's box, or recreate it with th
 bulbi rm ID | reset             # remove a box, or every Bulbi container, network and image
 bulbi git-scan [-p PROFILE]     # scan the checkouts for planted git metadata, apply [git] on_finding
 bulbi git-restore [ID]          # list quarantine records, or put one back (and trust it)
-bulbi pull [--branch B]         # isolated git mode: fetch the box clone's branches as bulbi/<branch>
+bulbi pull [--branch B]         # isolated git mode: fetch the box's branches as bulbi/<branch> (bundle)
 ```
 
 ## Architecture
@@ -61,16 +61,16 @@ gateway/       runs INSIDE the gateway container; standard library only.
                firewall (FirewallBackend ABC -> NftablesBackend), dns + resolver (DNS-pinned answers),
                nflog, audit, supervisor, daemon, relay (Linux host relay)
 image/         DockerfileBuilder, entrypoint (incl. idle watcher), gateway image, ImageBuilder
-container/     manager (BoxManager), gateway (GatewayManager), mounts (MountPlanner, read-only spec/.git
-               file/.bulbi overlays, GitMetadataMounts ABC: Protected/Isolated, host_exposure), identity
+container/     manager (BoxManager), gateway (GatewayManager), mounts (MountPlanner, read-only spec and
+               .bulbi overlays, GitMetadataMounts ABC: Protected/Isolated, host_exposure), identity
                (names/labels), sessions (session counting), handle, terminal (`docker exec`), gitvolume
-               (clone volumes + offline helper containers)
+               (box-repo volumes), execstream (BoxStream ABC: binary stdout out of the box, for bundles)
 gitsafety/     host side, docs/specs/git-safety.md. inventory (GitSnapshot of .git entries, admin dirs,
                configs incl. includes, hooks), baseline (.bulbi/git-baseline.json), checks (GitCheck ABC:
                NewGitDir/ForeignPointer/ExecConfig/HookChanged), exec_keys (ExecConfigRegistry), scanner,
                findings (GitFinding hierarchy), actions (FindingAction ABC: Quarantine/Block), quarantine
                (.bulbi/quarantine + restore), guard (GitGuard facade + audit), modes (GitMode ABC:
-               Guarded/Isolated), isolated (BoxClones seed/export, BoxClonePuller), config, hostgit
+               Guarded/Isolated), isolated (HostRefsExporter, BoxRepo, BundlePuller), config, hostgit
 sandbox/       orchestrator, planner (BoxPlanner: attach / restart / recreate / refuse), lock (.bulbi/box.lock),
                session (start sequence + teardown), hashing (spec hash), relay launcher, observer
 cli/           app.py (`bulbi.cli:main`), context.py (AppContext, composition root), commands/ (BulbiCommand ABC),
@@ -87,7 +87,7 @@ cli/           app.py (`bulbi.cli:main`), context.py (AppContext, composition ro
    - the box with `network_mode=container:<gateway>`, `cap_drop=ALL` and `no-new-privileges`, with project dirs mounted at their host paths;
    - the agent `prepare()`s the box.
 5. Each session is its own `docker exec`, with cwd set to the worktree it was launched from. Secrets are delivered on every attach.
-   Git safety (`[git]`): before every attach and after every session `GitGuard` scans the mounted checkouts against the baseline recorded at box creation and quarantines (or, with `on_finding = "block"`, refuses on) git metadata that would run code on the host. `mode = "isolated"` gives the box its own clone in a volume instead of the host's `.git`.
+   Git safety (`[git]`): before every attach and after every session `GitGuard` scans the mounted checkouts against the baseline recorded at box creation and quarantines (or, with `on_finding = "block"`, refuses on) git metadata that would run code on the host. `mode = "isolated"` gives the box its own small git dir in a volume instead of the host's `.git`: history is read through read-only alternates on the host's `objects/`, and `bulbi pull` brings commits back as a bundle.
 6. The box's PID 1 idle watcher stops it after `[box] idle_timeout` with no sessions. Stopped boxes are kept for fast restart.
 
 Network enforcement:

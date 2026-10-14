@@ -54,7 +54,7 @@ class BoxIdentity:
 
     @property
     def git_volume_name(self) -> str:
-        """The isolated-mode clone: one per project, shared by its profiles' boxes."""
+        """The isolated-mode box repo: one per project, shared by its profiles' boxes."""
         return f"{GIT_VOLUME_PREFIX}{self.box_name}-{self._project_hash}"
 
     def labels(self, spec_hash: str | None = None, *, gateway: bool = False) -> dict[str, str]:

@@ -46,7 +46,7 @@ class GitModeKind(StrEnum):
     """How the box reaches the project's git metadata (``[git] mode``)."""
 
     GUARDED = "guarded"  # Host metadata mounted; Bulbi scans and neutralises changes.
-    ISOLATED = "isolated"  # The box works on its own clone in a volume.
+    ISOLATED = "isolated"  # The box owns a small git dir; history is shared read-only.
 
 
 class FindingPolicy(StrEnum):
