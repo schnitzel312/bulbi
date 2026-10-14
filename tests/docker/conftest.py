@@ -1,8 +1,8 @@
 """Real-Docker test fixtures (``pytest -m docker``; skipped when Docker is unavailable).
 
 Every box created here is named ``<SUITE_PREFIX><run id>...`` and the session fixture
-removes exactly the containers, networks and images this run created; nothing else on
-the machine is touched. Test projects are temporary git repositories.
+removes exactly the containers, networks, clone volumes and images this run created;
+nothing else on the machine is touched. Test projects are temporary git repositories.
 """
 
 from __future__ import annotations
@@ -74,6 +74,9 @@ def _cleanup(client: docker.DockerClient, gateway_images_before: set[str]) -> No
     for network in client.networks.list(filters={"label": "bulbi=true"}):
         if network.name.startswith(prefix):
             network.remove()
+    for volume in client.volumes.list(filters={"label": "bulbi=true"}):
+        if volume.name.startswith(f"bulbi-git-{SUITE_PREFIX}{RUN_ID}"):
+            volume.remove(force=True)
     for image in client.images.list(filters={"label": "bulbi=true"}):
         tags = set(image.tags)
         built_box = any(tag.startswith(f"bulbi/{SUITE_PREFIX}{RUN_ID}") for tag in tags)

@@ -1,6 +1,6 @@
 # Bulbi
 
-Security-first sandbox for running AI coding CLIs (Claude Code, Codex, …) fully autonomously. The agent runs inside a Docker box whose file access, network egress and secrets are defined by one `bulbi.toml`; the box, not the agent, is the trust boundary.
+Security-first sandbox for running AI coding CLIs (Claude Code, Codex, …) fully autonomously. The agent runs inside a Docker box whose file access, network egress, secrets and git access are defined by one `bulbi.toml`; the box, not the agent, is the trust boundary.
 
 Product principles:
 - **Secure by default:** the agent can do only what `bulbi.toml` allows.
@@ -16,13 +16,13 @@ Design specs live in `docs/specs/`; read the relevant one before changing behavi
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # All four must pass before every commit
-.venv/bin/pytest -q                        # ~440 unit tests, ~3s, no Docker needed
+.venv/bin/pytest -q                        # ~540 unit tests, ~8s, no Docker needed
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 .venv/bin/mypy src                         # strict, configured in pyproject.toml
 
-# Real-Docker suite (escape tests + lifecycle), ~3 min, needs Docker and internet.
-# Required for changes to gateway/, container/, image/, sandbox/ or mounts.
+# Real-Docker suite (escape tests + git safety + lifecycle), ~6 min, needs Docker and internet.
+# Required for changes to gateway/, container/, image/, sandbox/, gitsafety/ or mounts.
 .venv/bin/pytest -m docker
 
 # Run the CLI locally
@@ -34,6 +34,9 @@ bulbi log [--denied]            # network audit log (DNS/TCP/UDP decisions with 
 bulbi ls                        # boxes, state and active sessions
 bulbi stop | restart            # stop the project's box, or recreate it with the current spec
 bulbi rm ID | reset             # remove a box, or every Bulbi container, network and image
+bulbi git-scan [-p PROFILE]     # scan the checkouts for planted git metadata, apply [git] on_finding
+bulbi git-restore [ID]          # list quarantine records, or put one back (and trust it)
+bulbi pull [--branch B]         # isolated git mode: fetch the box clone's branches as bulbi/<branch>
 ```
 
 ## Architecture
@@ -41,7 +44,7 @@ bulbi rm ID | reset             # remove a box, or every Bulbi container, networ
 All source lives in `src/bulbi/`, grouped by concern. Each extension point is an ABC with one subclass per variant, registered in a single place.
 
 ```
-errors.py      BulbiError -> SpecError, ToolError, AuditLogError, SandboxError, SecretError
+errors.py      BulbiError -> SpecError, ToolError, AuditLogError, SandboxError, SecretError, GitSafetyError
 constants.py   cross-cutting values (container paths, Docker labels, defaults)
 paths.py       expand_home: the single `~` rule
 docker_sdk.py  lazy Docker SDK import + error wrapping
@@ -58,8 +61,16 @@ gateway/       runs INSIDE the gateway container; standard library only.
                firewall (FirewallBackend ABC -> NftablesBackend), dns + resolver (DNS-pinned answers),
                nflog, audit, supervisor, daemon, relay (Linux host relay)
 image/         DockerfileBuilder, entrypoint (incl. idle watcher), gateway image, ImageBuilder
-container/     manager (BoxManager), gateway (GatewayManager), mounts (MountPlanner + read-only git/spec
-               overlays), identity (names/labels), sessions (session counting), handle, terminal (`docker exec`)
+container/     manager (BoxManager), gateway (GatewayManager), mounts (MountPlanner, read-only spec/.git
+               file/.bulbi overlays, GitMetadataMounts ABC: Protected/Isolated, host_exposure), identity
+               (names/labels), sessions (session counting), handle, terminal (`docker exec`), gitvolume
+               (clone volumes + offline helper containers)
+gitsafety/     host side, docs/specs/git-safety.md. inventory (GitSnapshot of .git entries, admin dirs,
+               configs incl. includes, hooks), baseline (.bulbi/git-baseline.json), checks (GitCheck ABC:
+               NewGitDir/ForeignPointer/ExecConfig/HookChanged), exec_keys (ExecConfigRegistry), scanner,
+               findings (GitFinding hierarchy), actions (FindingAction ABC: Quarantine/Block), quarantine
+               (.bulbi/quarantine + restore), guard (GitGuard facade + audit), modes (GitMode ABC:
+               Guarded/Isolated), isolated (BoxClones seed/export, BoxClonePuller), config, hostgit
 sandbox/       orchestrator, planner (BoxPlanner: attach / restart / recreate / refuse), lock (.bulbi/box.lock),
                session (start sequence + teardown), hashing (spec hash), relay launcher, observer
 cli/           app.py (`bulbi.cli:main`), context.py (AppContext, composition root), commands/ (BulbiCommand ABC),
@@ -76,6 +87,7 @@ cli/           app.py (`bulbi.cli:main`), context.py (AppContext, composition ro
    - the box with `network_mode=container:<gateway>`, `cap_drop=ALL` and `no-new-privileges`, with project dirs mounted at their host paths;
    - the agent `prepare()`s the box.
 5. Each session is its own `docker exec`, with cwd set to the worktree it was launched from. Secrets are delivered on every attach.
+   Git safety (`[git]`): before every attach and after every session `GitGuard` scans the mounted checkouts against the baseline recorded at box creation and quarantines (or, with `on_finding = "block"`, refuses on) git metadata that would run code on the host. `mode = "isolated"` gives the box its own clone in a volume instead of the host's `.git`.
 6. The box's PID 1 idle watcher stops it after `[box] idle_timeout` with no sessions. Stopped boxes are kept for fast restart.
 
 Network enforcement:
@@ -95,6 +107,9 @@ Network enforcement:
 | Network rule kind | Subclass `Rule` in `gateway/rules.py` and teach `RuleParser` its syntax. |
 | Firewall backend | Subclass `FirewallBackend`. |
 | Secret source / delivery | Subclass `SecretReader` / `SecretDelivery` and register it in `SecretReaders.builtin()` / `SecretDeliveries.builtin()`. |
+| Git safety check | Subclass `GitCheck` in `gitsafety/checks.py` (with a `GitFinding` subclass if it needs its own neutralisation) and add it to `GitSafetyScanner.default_checks()`. |
+| Exec-capable git key | Add an `ExecKey` to `ExecConfigRegistry.builtin()`. |
+| Git mode / finding policy | Subclass `GitMode` / `FindingAction` and register it in `GitModes.builtin()` / `FindingActions.builtin()`. |
 
 Never branch on an agent, tool or language name outside its own class (no `if agent == "claude"`).
 
@@ -111,16 +126,17 @@ Never branch on an agent, tool or language name outside its own class (no `if ag
 - Secret values are never logged, printed or put in argv or reprs. `bulbi check` never runs `command`/`keychain` sources unless `--probe-secrets` is given.
 - Network rules are enforced only from `bulbi.toml`. Agent/detector domains in source are just suggestions written into the starter spec.
 - Mark known gaps with `TODO(bulbi):`.
-- Security-sensitive changes (`gateway/`, `container/mounts.py`, `secrets/`, agent credentials) need a test that fails without the change. Anything that affects isolation also needs a case in the Docker escape suite.
+- Host git is only run through `gitsafety.hostgit.HostGit` (hermetic: neutral cwd, no system/global config); the scanner never runs git in an agent-controlled repository.
+- Security-sensitive changes (`gateway/`, `container/mounts.py`, `secrets/`, `gitsafety/`, agent credentials) need a test that fails without the change. Anything that affects isolation also needs a case in the Docker escape suite.
 
 ## Testing
 
-- **Unit tests,** one file per package: `test_spec`, `test_tools`, `test_validation`, `test_agents`, `test_detection`, `test_project`, `test_secrets`, `test_gateway`, `test_image`, `test_container`, `test_container_handle`, `test_sandbox`, `test_cli`.
+- **Unit tests,** one file per package: `test_spec`, `test_tools`, `test_validation`, `test_agents`, `test_detection`, `test_project`, `test_secrets`, `test_gateway`, `test_image`, `test_container`, `test_container_handle`, `test_sandbox`, `test_gitsafety`, `test_cli`.
   - No real Docker, keychain or internet: use the fakes in `tests/fakes.py`, and always inject fake secret readers. The keychain must never be touched.
   - CLI tests go through `click.testing.CliRunner` with an injected `AppContext`.
   - `tests/repos.py` builds real temporary git repos.
   - Firewall rulesets are golden-file tested against `tests/golden/*.nft`.
-- **`tests/docker/`** (`-m docker`): escape suite, git-escape suite, lifecycle.
-  - Test resources are named `bulbitest…`, and each test removes only what it created.
+- **`tests/docker/`** (`-m docker`): escape suite, git-escape suite, git-safety suite (vectors A/B/C in both git modes, `bulbi pull`), lifecycle.
+  - Test resources (boxes, gateways, networks, `bulbi-git-` volumes) are named `bulbitest…`, and each test removes only what it created.
   - Never touch the user's real boxes or the real repo's `.git`.
 - `.env` is excluded from git; never commit it.
