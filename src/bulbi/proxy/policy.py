@@ -24,13 +24,13 @@ class DomainPolicy(ABC):
 
 
 class AllowlistPolicy(DomainPolicy):
-    """Allows only the listed domains (exact match, no wildcards)."""
+    """Allows only the listed domains (exact, case-insensitive match; no wildcards)."""
 
     def __init__(self, domains: Iterable[str]) -> None:
-        self._domains = frozenset(domains)
+        self._domains = frozenset(domain.lower() for domain in domains)
 
     def allows(self, domain: str) -> bool:
-        return domain in self._domains
+        return domain.lower() in self._domains
 
 
 class AllowAllPolicy(DomainPolicy):

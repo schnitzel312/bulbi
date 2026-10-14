@@ -9,8 +9,9 @@ from http import HTTPStatus
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, OpenerDirector, ProxyHandler, Request, build_opener
 
 from bulbi.proxy.audit import AuditAction
 
@@ -24,6 +25,7 @@ UPSTREAM_TIMEOUT_SECONDS = 60
 DEFAULT_TLS_PORT = 443
 UNKNOWN_DOMAIN = "(unknown)"
 DENIED_MESSAGE = "Domain not in allowlist"
+HTTP_SCHEME = "http"
 
 # Headers that apply to a single connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -49,6 +51,17 @@ def host_without_port(host: str) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Hand redirects back to the client, which then asks the proxy again (and is checked)."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+# Ignores the host's own proxy environment variables and never follows redirects.
+_UPSTREAM_OPENER: OpenerDirector = build_opener(ProxyHandler({}), _NoRedirectHandler())
+
+
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     """Applies the domain policy to each request, audits it, then forwards it."""
 
@@ -59,9 +72,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def _context(self) -> ProxyContext:
         return cast("ProxyHTTPServer", self.server).context
 
-    def _admit(self, domain: str, method: str, url: str) -> bool:
-        """Check the policy, audit the decision, and reply 403 if denied."""
-        allowed = bool(domain) and self._context.policy.allows(domain)
+    def _admit(self, domain: str, method: str, url: str, *, permitted: bool = True) -> bool:
+        """Check the policy, audit the decision, and reply 403 if denied.
+
+        ``permitted=False`` denies regardless of the policy (a malformed request).
+        """
+        allowed = permitted and bool(domain) and self._context.policy.allows(domain)
         action = AuditAction.ALLOW if allowed else AuditAction.DENY
         self._context.audit.record(domain or UNKNOWN_DOMAIN, action, method, url)
         if not allowed:
@@ -71,7 +87,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     # ---- CONNECT (HTTPS tunnelling) ---------------------------------------
 
     def do_CONNECT(self) -> None:
-        if not self._admit(host_without_port(self.path), "CONNECT", self.path):
+        if not self._admit(host_without_port(self.path).lower(), "CONNECT", self.path):
             return
         target = self._connect_target()
         if target is None:
@@ -120,17 +136,52 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_http(self) -> None:
         method = self.command or "GET"
-        if not self._admit(self._request_domain(), method, self.path):
+        target, consistent = self._http_target()
+        if not self._admit(target, method, self.path, permitted=consistent):
+            return
+        request = self._upstream_request(method)
+        if request is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
             return
         try:
-            with urlopen(self._upstream_request(method), timeout=UPSTREAM_TIMEOUT_SECONDS) as resp:
-                status, headers, body = resp.status, resp.getheaders(), resp.read()
+            with _UPSTREAM_OPENER.open(request, timeout=UPSTREAM_TIMEOUT_SECONDS) as response:
+                self._relay_response(response.status, response.getheaders(), response.read())
+        except HTTPError as error:
+            # Upstream answered with a non-2xx status (redirects included): pass it on as is.
+            with error:
+                self._relay_response(error.code, list(error.headers.items()), error.read())
         except (OSError, ValueError, HTTPException) as exc:
-            # urllib's HTTPError (an OSError) means upstream answered with an error status.
-            # TODO(bulbi): relay upstream 4xx/5xx responses instead of mapping them to 502.
             logger.debug("HTTP forward failed for %s: %s", self.path, exc)
             self.send_error(HTTPStatus.BAD_GATEWAY, "Upstream request failed")
-            return
+
+    def _http_target(self) -> tuple[str, bool]:
+        """The host the request would actually be sent to, and whether it may be sent.
+
+        Only absolute ``http://`` URLs are forwarded, and a ``Host`` header, when present,
+        must name the same host; the policy is applied to the URL's own host.
+        """
+        url = urlsplit(self.path)
+        target = (url.hostname or "").lower()
+        if url.scheme != HTTP_SCHEME or not target:
+            return target, False
+        host_header = self.headers.get("Host")
+        if host_header and host_without_port(host_header).lower() != target:
+            return target, False
+        return target, True
+
+    def _upstream_request(self, method: str) -> Request | None:
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None
+        body = self.rfile.read(content_length) if content_length > 0 else None
+        request = Request(self.path, data=body, method=method)
+        for key, value in self.headers.items():
+            if key.lower() not in HOP_BY_HOP_HEADERS:
+                request.add_header(key, value)
+        return request
+
+    def _relay_response(self, status: int, headers: list[tuple[str, str]], body: bytes) -> None:
         self.send_response(status)
         for key, value in headers:
             if key.lower() not in HOP_BY_HOP_HEADERS:
@@ -138,19 +189,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
-
-    def _request_domain(self) -> str:
-        host = self.headers.get("Host") or urlparse(self.path).netloc
-        return host_without_port(host) if host else ""
-
-    def _upstream_request(self, method: str) -> Request:
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length) if content_length > 0 else None
-        request = Request(self.path, data=body, method=method)
-        for key, value in self.headers.items():
-            if key.lower() not in HOP_BY_HOP_HEADERS:
-                request.add_header(key, value)
-        return request
 
     do_GET = _handle_http  # noqa: N815
     do_POST = _handle_http  # noqa: N815

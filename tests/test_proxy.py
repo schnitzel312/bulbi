@@ -104,7 +104,7 @@ class _HelloHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def upstream_port():
     server = http.server.HTTPServer(("127.0.0.1", 0), _HelloHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     yield server.server_address[1]
     server.shutdown()
@@ -242,3 +242,115 @@ def test_audit_reader_rejects_malformed_lines(log_path: Path):
 
 def test_audit_log_path():
     assert audit_log_path(Path("/p")) == Path("/p/.bulbi/proxy.log")
+
+
+# ---- B2: the policy decides on the host actually contacted ---------------------
+
+
+def _raw_request(proxy_port: int, request_line: str, host: str) -> int:
+    conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+    method, url = request_line.split(maxsplit=1)
+    conn.putrequest(method, url, skip_host=True)
+    conn.putheader("Host", host)
+    conn.endheaders()
+    return conn.getresponse().status
+
+
+def test_host_header_spoof_is_denied_and_logged_with_real_target(
+    log_path: Path, upstream_port: int
+):
+    proxy = _start(AllowlistPolicy(["allowed.test"]), log_path)
+    try:
+        status = _raw_request(
+            proxy.start(), f"GET http://127.0.0.1:{upstream_port}/", "allowed.test"
+        )
+    finally:
+        proxy.stop()
+    assert status == 403
+    (entry,) = AuditLogReader(log_path).entries()
+    assert (entry.domain, entry.action) == ("127.0.0.1", "deny")
+
+
+@pytest.mark.parametrize(
+    "url", ["file:///etc/passwd", "ftp://allowed.test/x", "https://allowed.test/", "/relative"]
+)
+def test_non_http_or_relative_targets_are_denied(log_path: Path, url: str):
+    proxy = _start(AllowlistPolicy(["allowed.test"]), log_path)
+    try:
+        status = _raw_request(proxy.start(), f"GET {url}", "allowed.test")
+    finally:
+        proxy.stop()
+    assert status == 403
+    assert [e.action for e in AuditLogReader(log_path).entries()] == ["deny"]
+
+
+def test_matching_host_header_is_allowed(log_path: Path, upstream_port: int):
+    proxy = _start(AllowlistPolicy(["127.0.0.1"]), log_path)
+    try:
+        status = _raw_request(
+            proxy.start(), f"GET http://127.0.0.1:{upstream_port}/", f"127.0.0.1:{upstream_port}"
+        )
+    finally:
+        proxy.stop()
+    assert status == 200
+
+
+class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/missing":
+            self.send_error(404, "nope")
+            return
+        self.send_response(302)
+        self.send_header("Location", "http://unlisted.test/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def redirecting_port():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _RedirectingHandler)
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    yield server.server_address[1]
+    server.shutdown()
+    server.server_close()
+
+
+def test_redirects_are_relayed_not_followed(log_path: Path, redirecting_port: int):
+    proxy = _start(AllowlistPolicy(["127.0.0.1"]), log_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", proxy.start(), timeout=5)
+        conn.request("GET", f"http://127.0.0.1:{redirecting_port}/")
+        response = conn.getresponse()
+    finally:
+        proxy.stop()
+    assert response.status == 302
+    assert response.getheader("Location") == "http://unlisted.test/"
+    assert [e.domain for e in AuditLogReader(log_path).entries()] == ["127.0.0.1"]
+
+
+def test_upstream_error_status_is_relayed(log_path: Path, redirecting_port: int):
+    proxy = _start(AllowlistPolicy(["127.0.0.1"]), log_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", proxy.start(), timeout=5)
+        conn.request("GET", f"http://127.0.0.1:{redirecting_port}/missing")
+        assert conn.getresponse().status == 404
+    finally:
+        proxy.stop()
+
+
+def test_unreachable_upstream_is_a_502(log_path: Path):
+    proxy = _start(AllowlistPolicy(["127.0.0.1"]), log_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", proxy.start(), timeout=5)
+        conn.request("GET", "http://127.0.0.1:1/")
+        assert conn.getresponse().status == 502
+    finally:
+        proxy.stop()
+
+
+def test_allowlist_matching_ignores_case():
+    assert AllowlistPolicy(["Example.COM"]).allows("example.com")
