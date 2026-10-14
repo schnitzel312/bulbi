@@ -505,3 +505,51 @@ def test_run_from_worktree_uses_main_spec_and_warns_when_its_copy_differs(tmp_pa
     assert "evil.test" not in gateway_env["BULBI_GATEWAY_CONFIG"]
     assert "pypi.org" in gateway_env["BULBI_GATEWAY_CONFIG"]
     assert harness.runner.calls[0][harness.runner.calls[0].index("-w") + 1] == str(wt)
+
+
+# ---- check exit code and pre-flight validation ----------------------------------------------
+
+ERROR_SPEC = SPEC.replace('"git"]', '"git", "cobol"]')
+
+
+def test_check_exits_1_when_validation_finds_errors(cli: Harness):
+    cli.write_spec(ERROR_SPEC)
+    result = cli.invoke("check")
+    assert result.exit_code == 1
+    assert "Errors:" in result.output and "✗ unknown tool: 'cobol'" in result.output
+    assert "Box: demo" in result.output  # the full report is still printed
+
+
+def test_check_exits_0_with_warnings_only(cli: Harness):
+    cli.write_spec()
+    result = cli.invoke("check")
+    assert result.exit_code == 0
+    assert "Warnings:" in result.output and "Errors:" not in result.output
+
+
+@pytest.mark.parametrize("command", [["run"], ["shell"]])
+def test_validation_errors_block_run_and_shell_before_anything_starts(cli: Harness, command):
+    cli.write_spec(ERROR_SPEC)
+    result = cli.invoke(*command)
+    assert result.exit_code == 1
+    assert "Errors:" in result.output and "✗ unknown tool: 'cobol'" in result.output
+    assert cli.docker.images.builds == []
+    assert cli.docker.containers.run_calls == []
+    assert cli.runner.calls == []
+
+
+def test_profile_is_resolved_before_validation(cli: Harness):
+    # The root spec allows an interpreter (a warning); the profile narrows tools to git only.
+    cli.write_spec()
+    result = cli.invoke("run", "-p", "offline")
+    assert result.exit_code == 0
+    assert "interpreters allowed" not in result.output
+
+
+def test_warnings_are_shown_but_do_not_block(cli: Harness):
+    cli.write_spec()
+    result = cli.invoke("run")
+    assert result.exit_code == 0
+    assert "Warnings:" in result.output and "interpreters allowed (python)" in result.output
+    assert "Spec is valid" not in result.output
+    assert cli.runner.calls

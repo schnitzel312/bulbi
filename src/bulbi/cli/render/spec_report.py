@@ -13,6 +13,7 @@ from bulbi.cli.render.styles import (
     EMPTY_CELL,
     styled,
 )
+from bulbi.cli.render.validation import ValidationRenderer
 from bulbi.spec import BulbiSpec
 from bulbi.validation import ValidationResult
 
@@ -37,7 +38,7 @@ class SpecReportRenderer:
         if spec.profiles:
             self._console.print(self._profiles_table(spec))
         self._console.print(self._limits_table(spec))
-        self._print_validation(result)
+        ValidationRenderer(self._console).render(result)
         self._console.print()
 
     @staticmethod
@@ -97,15 +98,3 @@ class SpecReportRenderer:
         table.add_row("CPU", str(spec.limits.cpu))
         table.add_row("Memory", spec.limits.memory)
         return table
-
-    def _print_validation(self, result: ValidationResult) -> None:
-        if result.errors:
-            self._console.print("\n[bold red]Errors:[/bold red]")
-            for error in result.errors:
-                self._console.print(f"  {styled(f'✗ {error}', DENIED_STYLE)}")
-        if result.warnings:
-            self._console.print("\n[bold yellow]Warnings:[/bold yellow]")
-            for warning in result.warnings:
-                self._console.print(f"  {styled(f'! {warning}', CAUTION_STYLE)}")
-        if not result.errors and not result.warnings:
-            self._console.print("\n[green]Spec is valid with no warnings.[/green]")

@@ -10,6 +10,7 @@ import click
 from bulbi.cli.commands.base import BulbiCommand, ClickDecorator
 from bulbi.cli.context import AppContext
 from bulbi.cli.render.progress import ConsoleSandboxObserver
+from bulbi.cli.render.validation import ValidationRenderer
 from bulbi.constants import SPEC_FILENAME
 from bulbi.sandbox import SandboxSession
 from bulbi.spec import BulbiSpec
@@ -45,7 +46,15 @@ class SandboxCommand(BulbiCommand):
         label: str,
         profile: str | None = None,
     ) -> NoReturn:
-        """Attach to (or start) the box, run ``command`` and exit with its exit code."""
+        """Validate, attach to (or start) the box, run ``command``; exit with its exit code.
+
+        The effective (profile-resolved) spec gets the same validation as ``check``:
+        errors stop everything before any image is built; warnings are only shown.
+        """
+        result = app.validator.validate(spec)
+        ValidationRenderer(app.console).render(result, show_success=False)
+        if not result.ok:
+            click.get_current_context().exit(1)
         if app.worktree_spec_differs():
             app.console.print(
                 f"[yellow]! This worktree's {SPEC_FILENAME} differs from the main checkout's; "

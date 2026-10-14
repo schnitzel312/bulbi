@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import click
+
 from bulbi.cli.commands.base import BulbiCommand
 from bulbi.cli.context import AppContext
 from bulbi.cli.render.spec_report import SpecReportRenderer
@@ -9,8 +11,11 @@ from bulbi.cli.render.spec_report import SpecReportRenderer
 
 class CheckCommand(BulbiCommand):
     name = "check"
-    help = "Validate the spec and show what the box can/cannot do."
+    help = "Validate the spec and show what the box can/cannot do (exit 1 on errors)."
 
     def execute(self, app: AppContext) -> None:
         spec = app.load_spec()
-        SpecReportRenderer(app.console).render(spec, app.validator.validate(spec))
+        result = app.validator.validate(spec)
+        SpecReportRenderer(app.console).render(spec, result)
+        if not result.ok:
+            click.get_current_context().exit(1)
