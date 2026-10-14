@@ -19,9 +19,9 @@ from bulbi.proxy import (
     AuditAction,
     AuditLogReader,
     AuditLogWriter,
-    DomainPolicy,
     ProxyServer,
     audit_log_path,
+    policy_for,
 )
 from bulbi.proxy.handler import host_without_port
 from bulbi.spec import NetworkSpec
@@ -160,7 +160,7 @@ def test_connect_to_unlisted_domain_is_denied(log_path: Path, upstream_port: int
 
 def test_network_default_allow_lets_unlisted_domains_through(log_path: Path, upstream_port: int):
     """Bug (a): network.default = "allow" used to be ignored by the proxy."""
-    policy = DomainPolicy.for_network(NetworkSpec(default="allow", allow=[]))
+    policy = policy_for(NetworkSpec(default="allow", allow=[]))
     proxy = _start(policy, log_path)
     try:
         assert _get_via_proxy(proxy.start(), upstream_port)[0] == 200
@@ -189,8 +189,8 @@ def test_allow_all_policy():
 
 
 def test_policy_for_network_spec():
-    assert isinstance(DomainPolicy.for_network(NetworkSpec(default="deny")), AllowlistPolicy)
-    assert isinstance(DomainPolicy.for_network(NetworkSpec(default="allow")), AllowAllPolicy)
+    assert isinstance(policy_for(NetworkSpec(default="deny")), AllowlistPolicy)
+    assert isinstance(policy_for(NetworkSpec(default="allow")), AllowAllPolicy)
 
 
 @pytest.mark.parametrize(

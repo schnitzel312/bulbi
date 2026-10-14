@@ -15,13 +15,6 @@ class DomainPolicy(ABC):
     def allows(self, domain: str) -> bool:
         """True if traffic to ``domain`` may be forwarded."""
 
-    @staticmethod
-    def for_network(network: NetworkSpec) -> DomainPolicy:
-        """The policy implementing a spec's ``[network]`` section."""
-        if network.default is NetworkDefault.ALLOW:
-            return AllowAllPolicy()
-        return AllowlistPolicy(network.allow)
-
 
 class AllowlistPolicy(DomainPolicy):
     """Allows only the listed domains (exact, case-insensitive match; no wildcards)."""
@@ -38,3 +31,10 @@ class AllowAllPolicy(DomainPolicy):
 
     def allows(self, domain: str) -> bool:
         return True
+
+
+def policy_for(network: NetworkSpec) -> DomainPolicy:
+    """The policy implementing a spec's ``[network]`` section."""
+    if network.default is NetworkDefault.ALLOW:
+        return AllowAllPolicy()
+    return AllowlistPolicy(network.allow)

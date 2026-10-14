@@ -15,7 +15,7 @@ from bulbi.container.mounts import MountPlanner
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
 from bulbi.image import ImageBuilder
-from bulbi.proxy import AuditLogWriter, DomainPolicy, ProxyServer, audit_log_path
+from bulbi.proxy import AuditLogWriter, ProxyServer, audit_log_path, policy_for
 from bulbi.sandbox.observer import SandboxObserver
 from bulbi.spec import BulbiSpec
 
@@ -82,7 +82,7 @@ class SandboxSession:
         image_tag = self._services.images.build(self._spec, self._agent)
 
         proxy = ProxyServer(
-            DomainPolicy.for_network(self._spec.network),
+            policy_for(self._spec.network),
             AuditLogWriter(audit_log_path(self._project_root)),
         )
         proxy_port = proxy.start()

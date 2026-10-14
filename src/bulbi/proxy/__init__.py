@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bulbi.proxy.audit import AuditAction, AuditLogReader, AuditLogWriter, LogEntry, audit_log_path
-from bulbi.proxy.policy import AllowAllPolicy, AllowlistPolicy, DomainPolicy
+from bulbi.proxy.policy import AllowAllPolicy, AllowlistPolicy, DomainPolicy, policy_for
 from bulbi.proxy.server import ProxyServer
 
 __all__ = [
@@ -16,4 +16,5 @@ __all__ = [
     "LogEntry",
     "ProxyServer",
     "audit_log_path",
+    "policy_for",
 ]
