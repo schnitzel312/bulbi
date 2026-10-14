@@ -23,9 +23,12 @@ def docker_sdk() -> Any:
 
 
 def connect_to_docker() -> Any:
-    """A client for the Docker daemon configured in the environment."""
-    with docker_errors("Docker is not available"):
-        return docker_sdk().from_env()
+    """A client for the Docker daemon configured in the environment.
+
+    Connection failures raise the SDK's own errors; the caller (``AppContext``) wraps
+    them, which also covers injected client factories.
+    """
+    return docker_sdk().from_env()
 
 
 @contextmanager

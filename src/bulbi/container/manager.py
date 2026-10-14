@@ -11,9 +11,9 @@ from typing import Any
 
 from bulbi.agents.ports import ContainerHandle
 from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_BOX, DOCKER_LABEL_VALUE
-from bulbi.container.docker_sdk import docker_errors, docker_sdk
 from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.mounts import BindMount
+from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.spec import BulbiSpec, LimitsSpec
 
 _NAME_HASH_LENGTH = 8

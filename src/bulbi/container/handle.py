@@ -13,7 +13,7 @@ from typing import Any
 
 from bulbi.agents.ports import DEFAULT_FILE_MODE, ContainerHandle, ExecResult
 from bulbi.constants import CONTAINER_HOME, CONTAINER_USER
-from bulbi.container.docker_sdk import docker_errors
+from bulbi.docker_sdk import docker_errors
 from bulbi.errors import SandboxError
 
 Clock = Callable[[], float]

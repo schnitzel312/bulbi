@@ -7,7 +7,7 @@ from typing import Any
 
 from bulbi.agents import Agent
 from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_VALUE
-from bulbi.container.docker_sdk import docker_errors, docker_sdk
+from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.image.dockerfile import DockerfileBuilder
 from bulbi.spec import BulbiSpec
 

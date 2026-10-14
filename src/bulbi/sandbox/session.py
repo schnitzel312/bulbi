@@ -37,7 +37,7 @@ class SandboxServices:
     terminal: TerminalExec
     environment: EnvironmentBuilder = field(default_factory=EnvironmentBuilder)
     proxy_factory: ProxyFactory = audited_proxy
-    mount_planner: MountPlannerFactory = MountPlanner
+    mount_planner_factory: MountPlannerFactory = MountPlanner
 
 
 class SandboxSession:
@@ -101,7 +101,7 @@ class SandboxSession:
             self._spec,
             self._project_root,
             image_tag,
-            self._services.mount_planner(self._project_root).plan(self._spec),
+            self._services.mount_planner_factory(self._project_root).plan(self._spec),
             environment,
         )
         self._cleanup.callback(self._services.boxes.stop, box.id)

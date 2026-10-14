@@ -1,4 +1,8 @@
-"""Tests for the sandbox session orchestration (fake Docker, real local proxy)."""
+"""Tests for the sandbox session orchestration.
+
+Docker is always faked. Most tests also use a fake proxy; a few start the real proxy
+on localhost to check that its port is bound and released.
+"""
 
 from collections.abc import Mapping
 from dataclasses import replace

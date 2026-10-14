@@ -10,11 +10,11 @@ from typing import Any
 from rich.console import Console
 
 from bulbi.agents import Agent, AgentRegistry
-from bulbi.container.docker_sdk import connect_to_docker, docker_errors
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.manager import BoxManager
 from bulbi.container.terminal import TerminalExec
 from bulbi.detection import DetectorRegistry
+from bulbi.docker_sdk import connect_to_docker, docker_errors
 from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.sandbox import SandboxServices
 from bulbi.spec import BulbiSpec, ProfileMerger, SpecLoader

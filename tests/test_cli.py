@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from textwrap import dedent
 
+import docker
 import docker.errors
 import pytest
 from click.testing import CliRunner, Result
@@ -14,6 +15,7 @@ from bulbi.cli import main
 from bulbi.cli.context import AppContext
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.terminal import TerminalExec
+from bulbi.errors import SandboxError
 from bulbi.image import ImageBuilder
 from bulbi.spec import SpecLoader
 from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
@@ -316,3 +318,14 @@ def test_importing_the_cli_does_not_load_the_docker_sdk():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     ).stdout
     assert output.strip() == "False"
+
+
+def test_default_docker_factory_errors_are_wrapped_once(tmp_path: Path, monkeypatch):
+    def unavailable():
+        raise docker.errors.DockerException("no socket")
+
+    monkeypatch.setattr(docker, "from_env", unavailable)
+    app = AppContext(project_root=tmp_path, console=Console(width=200))
+    with pytest.raises(SandboxError) as excinfo:
+        _ = app.docker
+    assert str(excinfo.value) == "Docker is not available: no socket"
