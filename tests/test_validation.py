@@ -155,3 +155,18 @@ def test_profile_widening_network_default_is_an_error():
     assert validate_spec(spec).errors == [
         "profile 'open' widens network default from 'deny' to 'allow'"
     ]
+
+
+def test_secret_warning_does_not_claim_the_secret_is_injected():
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=[])})
+    (warning,) = [w for w in validate_spec(spec).warnings if "secret" in w]
+    assert "not implemented" in warning
+    assert "available to all proxied requests" not in warning
+
+
+def test_unknown_secret_source_is_kept_for_the_rule_to_report():
+    from bulbi.spec import SecretSource
+
+    assert SecretSpec(from_source="env").from_source is SecretSource.ENV
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="vault", hosts=["a"])})
+    assert validate_spec(spec).errors == ["secret 'KEY': only 'env' source is supported in v1"]

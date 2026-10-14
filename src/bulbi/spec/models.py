@@ -95,10 +95,16 @@ class SecretSpec:
     """A host secret and the hosts it may be sent to.
 
     Secrets are parsed and validated only; Bulbi does not inject them anywhere yet.
+    ``from_source`` is coerced to :class:`SecretSource` when recognised and otherwise
+    kept as the raw string, so validation can report an unsupported source.
     """
 
-    from_source: str
+    from_source: SecretSource | str
     hosts: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.from_source in {source.value for source in SecretSource}:
+            object.__setattr__(self, "from_source", SecretSource(self.from_source))
 
 
 @dataclass(frozen=True)

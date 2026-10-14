@@ -12,9 +12,8 @@ class SecretSourceRule(ValidationRule):
     """Only environment-variable secrets are supported."""
 
     def check(self, spec: BulbiSpec) -> Iterator[ValidationIssue]:
-        supported = {source.value for source in SecretSource}
         for name, secret in spec.secrets.items():
-            if secret.from_source not in supported:
+            if not isinstance(secret.from_source, SecretSource):
                 yield ValidationIssue.error(
                     f"secret '{name}': only 'env' source is supported in v1"
                 )
@@ -27,6 +26,6 @@ class SecretHostsRule(ValidationRule):
         for name, secret in spec.secrets.items():
             if not secret.hosts:
                 yield ValidationIssue.warning(
-                    f"secret '{name}' has no host restriction — "
-                    "it will be available to all proxied requests"
+                    f"secret '{name}' has no host restriction "
+                    "(note: secret injection is not implemented yet, so the value is not used)"
                 )
