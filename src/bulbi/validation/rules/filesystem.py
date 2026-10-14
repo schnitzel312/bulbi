@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from bulbi.container.mounts import PROJECT_MOUNT_PATH, is_worktree_container
+from bulbi.paths import expand_home
 from bulbi.project.locator import Project
 from bulbi.spec import BulbiSpec
 from bulbi.validation.base import ValidationIssue, ValidationRule
@@ -31,9 +32,7 @@ class _HostPaths:
         self.root = project.root if project else Path.cwd().resolve()
 
     def resolve(self, raw: str) -> Path:
-        if raw.startswith("~"):
-            return Path(raw.replace("~", str(self.home), 1)).resolve()
-        path = Path(raw)
+        path = Path(expand_home(raw, self.home))
         return path.resolve() if path.is_absolute() else (self.root / path).resolve()
 
 

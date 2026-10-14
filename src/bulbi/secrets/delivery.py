@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from bulbi.agents.ports import ContainerHandle
 from bulbi.constants import CONTAINER_HOME
 from bulbi.errors import SandboxError
+from bulbi.paths import expand_home
 from bulbi.secrets.model import ResolvedSecret
 from bulbi.spec import SecretTarget
 
@@ -20,9 +21,7 @@ SECRET_FILE_MODE = 0o600
 
 def box_path(path: str) -> str:
     """A secret file path in the box, with ``~`` meaning the box user's home."""
-    if path == "~" or path.startswith("~/"):
-        return CONTAINER_HOME + path[1:]
-    return path
+    return expand_home(path, CONTAINER_HOME)
 
 
 class SecretDelivery(ABC):

@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from bulbi.constants import MACOS_SYSTEM_NAME
+from bulbi.paths import expand_home
 from bulbi.spec import SecretSource
 
 COMMAND_TIMEOUT_SECONDS = 10
@@ -58,7 +59,7 @@ class FileReader(SecretReader):
 
     def read(self, source: str) -> str:
         home = self._home or Path.home()
-        path = Path(source.replace("~", str(home), 1) if source.startswith("~") else source)
+        path = Path(expand_home(source, home))
         try:
             return path.read_text()
         except OSError as exc:

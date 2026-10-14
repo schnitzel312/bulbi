@@ -21,6 +21,7 @@ from pathlib import Path
 
 from bulbi.constants import CONTAINER_WORKSPACE, SPEC_FILENAME
 from bulbi.errors import SpecError
+from bulbi.paths import expand_home
 from bulbi.project.locator import Project
 from bulbi.spec import BulbiSpec, MountSpec
 
@@ -170,8 +171,9 @@ class MountPlanner:
                 yield TmpfsMount(masked) if path.is_dir() else BindMount(MASK_SOURCE, masked, True)
 
     def _host_path(self, raw: str) -> Path:
-        if raw.startswith("~"):
-            return Path(raw.replace("~", str(self._home), 1)).resolve()
+        expanded = expand_home(raw, self._home)
+        if expanded != raw:
+            return Path(expanded).resolve()  # ~ paths follow symlinks, as before
         path = Path(raw)
         return path if path.is_absolute() else (self._project.root / path).resolve()
 

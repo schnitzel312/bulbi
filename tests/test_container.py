@@ -382,3 +382,14 @@ def test_reap_removes_gateways_of_removed_boxes_and_stops_those_of_stopped_boxes
 
     assert kept_gateway.status == "exited" and not kept_gateway.removed
     assert orphan_gateway.removed and orphan_network.removed
+
+
+@pytest.mark.parametrize(
+    ("raw", "expanded"),
+    [("~", "/h"), ("~/x/y", "/h/x/y"), ("/opt/~cache", "/opt/~cache"), ("~user/x", "~user/x"),
+     ("rel/~", "rel/~")],
+)  # fmt: skip
+def test_expand_home_is_the_single_tilde_rule_review_minor_5(raw, expanded):
+    from bulbi.paths import expand_home
+
+    assert expand_home(raw, "/h") == expanded
