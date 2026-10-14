@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import click
@@ -160,19 +159,13 @@ def _run_in_sandbox(
     """Build image, start proxy + container, run a command, then clean up."""
     from bulbi.container.manager import run_in_box, start_box, stop_box
     from bulbi.image import build_image
-    from bulbi.log import ensure_log_dir, get_log_path
-    from bulbi.proxy import AllowlistProxy
-
-    ensure_log_dir(project_root)
-    log_path = get_log_path(project_root)
+    from bulbi.proxy import AuditLogWriter, DomainPolicy, ProxyServer, audit_log_path
 
     console.print(f"[bold]Building image for [cyan]{spec.box.name}[/cyan]...[/bold]")
     build_image(spec, project_root)
 
-    proxy = AllowlistProxy(
-        allowed_domains=spec.network.allow,
-        secrets=spec.secrets,
-        log_path=log_path,
+    proxy = ProxyServer(
+        DomainPolicy.for_network(spec.network), AuditLogWriter(audit_log_path(project_root))
     )
     container_id: str | None = None
 
@@ -254,26 +247,35 @@ def shell(profile: str | None) -> None:
 @click.option("--denied", is_flag=True, help="Show only denied requests.")
 def log_cmd(denied: bool) -> None:
     """Show proxy log entries (allowed/denied network requests)."""
-    from bulbi.log import get_log_path, format_log_table
+    from bulbi.errors import AuditLogError
+    from bulbi.proxy import AuditLogReader, audit_log_path
 
-    project_root = Path.cwd()
-    log_path = get_log_path(project_root)
-
-    if not log_path.exists():
+    reader = AuditLogReader(audit_log_path(Path.cwd()))
+    if not reader.exists():
         raise click.ClickException(
-            f"No log file found at {log_path}. Run a command first."
+            f"No log file found at {reader.path}. Run a command first."
         )
-
     try:
-        entries = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise click.ClickException(f"Failed to parse log file: {exc}")
+        entries = reader.entries()
+    except AuditLogError as exc:
+        raise click.ClickException(str(exc))
 
-    table = format_log_table(entries, denied_only=denied)
+    table = Table(title="Proxy Log")
+    table.add_column("Time", style="dim")
+    table.add_column("Domain")
+    table.add_column("Action")
+    table.add_column("Method", style="bold")
+    table.add_column("URL")
+    for entry in entries:
+        if denied and not entry.denied:
+            continue
+        style = "red" if entry.denied else "green"
+        table.add_row(entry.timestamp, entry.domain, f"[{style}]{entry.action}[/{style}]",
+                      entry.method, entry.url)
     console.print(table)
 
     total = len(entries)
-    denied_count = sum(1 for e in entries if e.get("action") == "deny")
+    denied_count = sum(1 for e in entries if e.denied)
     console.print(
         f"\n[dim]{total} total entries, {denied_count} denied[/dim]\n"
     )
