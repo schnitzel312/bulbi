@@ -10,7 +10,8 @@ from rich.console import Console
 from rich.table import Table
 
 from bulbi.constants import SPEC_FILENAME
-from bulbi.spec import BulbiSpec, load_spec, SpecError
+from bulbi.errors import SpecError
+from bulbi.spec import BulbiSpec, ProfileMerger, SpecLoader
 
 console = Console()
 
@@ -58,7 +59,7 @@ def check() -> None:
     project_root = Path.cwd()
 
     try:
-        spec = load_spec(project_root)
+        spec = SpecLoader().load(project_root)
     except SpecError as exc:
         raise click.ClickException(str(exc))
 
@@ -189,13 +190,13 @@ def _load_and_resolve(profile: str | None) -> tuple[BulbiSpec, Path]:
     """Load the spec from cwd and optionally apply a profile."""
     project_root = Path.cwd()
     try:
-        spec = load_spec(project_root)
+        spec = SpecLoader().load(project_root)
     except SpecError as exc:
         raise click.ClickException(str(exc))
 
     if profile:
         try:
-            spec = spec.resolve_profile(profile)
+            spec = ProfileMerger().resolve(spec, profile)
         except SpecError as exc:
             raise click.ClickException(str(exc))
 

@@ -9,6 +9,9 @@ CONTAINER_WORKSPACE = f"{CONTAINER_HOME}/workspace"
 DOCKER_LABEL = "bulbi"
 DOCKER_LABEL_BOX = "bulbi.box"
 
+# Agent launched when the spec does not name one.
+DEFAULT_AGENT = "claude"
+
 # Default resource limits.
 DEFAULT_CPU = 2
 DEFAULT_MEMORY = "4GB"

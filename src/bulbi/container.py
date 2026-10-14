@@ -27,7 +27,7 @@ from bulbi.constants import (
     SPEC_FILENAME,
 )
 from bulbi.image import build_image
-from bulbi.spec import BulbiSpec
+from bulbi.spec import BulbiSpec, ProfileMerger
 
 _MEMORY_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
@@ -282,7 +282,7 @@ def start_box(
 ) -> str:
     """Build image and start a long-running container. Returns container ID."""
     if profile is not None:
-        spec = spec.resolve_profile(profile)
+        spec = ProfileMerger().resolve(spec, profile)
 
     image_tag = build_image(spec, project_root)
     client = docker.from_env()

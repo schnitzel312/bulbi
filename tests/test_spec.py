@@ -5,7 +5,8 @@ from textwrap import dedent
 
 import pytest
 
-from bulbi.spec import BulbiSpec, SpecError, load_spec, merge_profile
+from bulbi.errors import SpecError
+from bulbi.spec import ProfileMerger, SpecLoader
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ def sample_toml(tmp_path: Path) -> Path:
 
 
 def test_load_spec(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     assert spec.box.name == "test-project"
     assert spec.box.agent == "claude"
     assert spec.tools.allow == ["python@3.12", "git", "rg"]
@@ -76,71 +77,71 @@ def test_load_spec(sample_toml: Path):
 
 
 def test_network_allow(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     assert "pypi.org" in spec.network.allow
 
 
 def test_content_hash_stable(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     assert spec.content_hash() == spec.content_hash()
 
 
 def test_profile_narrows_tools(sample_toml: Path):
-    spec = load_spec(sample_toml)
-    narrowed = spec.resolve_profile("test-runner")
+    spec = SpecLoader().load(sample_toml)
+    narrowed = ProfileMerger().resolve(spec, "test-runner")
     assert narrowed.tools.allow == ["python@3.12"]
 
 
 def test_profile_narrows_mounts(sample_toml: Path):
-    spec = load_spec(sample_toml)
-    narrowed = spec.resolve_profile("reviewer")
+    spec = SpecLoader().load(sample_toml)
+    narrowed = ProfileMerger().resolve(spec, "reviewer")
     dot_mount = next(m for m in narrowed.mounts if m.path == ".")
     assert dot_mount.mode == "read-only"
 
 
 def test_profile_narrows_network(sample_toml: Path):
-    spec = load_spec(sample_toml)
-    narrowed = spec.resolve_profile("reviewer")
+    spec = SpecLoader().load(sample_toml)
+    narrowed = ProfileMerger().resolve(spec, "reviewer")
     assert narrowed.network.allow == []
 
 
 def test_profile_cannot_widen_tools(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     from bulbi.spec import ProfileSpec, ToolsSpec
 
     bad_profile = ProfileSpec(tools=ToolsSpec(allow=["python@3.12", "curl"]))
     with pytest.raises(SpecError, match="widens tools"):
-        merge_profile(spec, bad_profile)
+        ProfileMerger().merge(spec, bad_profile)
 
 
 def test_profile_cannot_widen_network(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     from bulbi.spec import NetworkSpec, ProfileSpec
 
     bad_profile = ProfileSpec(network=NetworkSpec(allow=["evil.com"]))
     with pytest.raises(SpecError, match="widens network"):
-        merge_profile(spec, bad_profile)
+        ProfileMerger().merge(spec, bad_profile)
 
 
 def test_profile_cannot_widen_mounts(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     from bulbi.spec import ProfileSpec
 
     # Try to make read-only mount writable
     bad_profile = ProfileSpec(mounts={"~/docs": "read-write"})
     with pytest.raises(SpecError, match="widens mount"):
-        merge_profile(spec, bad_profile)
+        ProfileMerger().merge(spec, bad_profile)
 
 
 def test_unknown_profile(sample_toml: Path):
-    spec = load_spec(sample_toml)
+    spec = SpecLoader().load(sample_toml)
     with pytest.raises(SpecError, match="unknown profile"):
-        spec.resolve_profile("nonexistent")
+        ProfileMerger().resolve(spec, "nonexistent")
 
 
 def test_missing_spec_file(tmp_path: Path):
     with pytest.raises(SpecError, match="no bulbi.toml"):
-        load_spec(tmp_path)
+        SpecLoader().load(tmp_path)
 
 
 def test_missing_box_name(tmp_path: Path):
@@ -152,7 +153,7 @@ def test_missing_box_name(tmp_path: Path):
         allow = ["git"]
     """))
     with pytest.raises(SpecError, match="box.name is required"):
-        load_spec(tmp_path)
+        SpecLoader().load(tmp_path)
 
 
 def test_invalid_mount_mode(tmp_path: Path):
@@ -167,7 +168,7 @@ def test_invalid_mount_mode(tmp_path: Path):
         mode = "execute"
     """))
     with pytest.raises(SpecError, match="mount mode"):
-        load_spec(tmp_path)
+        SpecLoader().load(tmp_path)
 
 
 def test_pyproject_toml_fallback(tmp_path: Path):
@@ -182,5 +183,97 @@ def test_pyproject_toml_fallback(tmp_path: Path):
         allow = ["python@3.12"]
     """)
     (tmp_path / "pyproject.toml").write_text(pyproject)
-    spec = load_spec(tmp_path)
+    spec = SpecLoader().load(tmp_path)
     assert spec.box.name == "from-pyproject"
+
+
+def _minimal_spec_toml(name: str) -> str:
+    return f'spec = "0.1"\n[box]\nname = "{name}"\n'
+
+
+def test_bulbi_toml_takes_precedence_over_pyproject(tmp_path: Path):
+    (tmp_path / "bulbi.toml").write_text(_minimal_spec_toml("from-bulbi-toml"))
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.bulbi]\nspec = "0.1"\n[tool.bulbi.box]\nname = "from-pyproject"\n'
+    )
+    assert SpecLoader().load(tmp_path).box.name == "from-bulbi-toml"
+
+
+def test_pyproject_without_bulbi_table_is_not_a_spec(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    with pytest.raises(SpecError, match="no bulbi.toml"):
+        SpecLoader().load(tmp_path)
+
+
+def test_invalid_toml_raises_spec_error(tmp_path: Path):
+    (tmp_path / "bulbi.toml").write_text("this is = = not toml")
+    with pytest.raises(SpecError, match="invalid TOML"):
+        SpecLoader().load(tmp_path)
+
+
+def test_parser_accepts_single_setup_command_string():
+    from bulbi.spec import SpecParser
+
+    spec = SpecParser().parse({"box": {"name": "x"}, "setup": {"run": "make"}})
+    assert spec.setup.run == ["make"]
+
+
+def test_parser_rejects_unsupported_version():
+    from bulbi.spec import SpecParser
+
+    with pytest.raises(SpecError, match="unsupported spec version"):
+        SpecParser().parse({"spec": "9.9", "box": {"name": "x"}})
+
+
+def test_parser_rejects_invalid_network_default():
+    from bulbi.spec import SpecParser
+
+    with pytest.raises(SpecError, match="network.default must be 'deny' or 'allow'"):
+        SpecParser().parse({"box": {"name": "x"}, "network": {"default": "maybe"}})
+
+
+def test_parser_requires_mount_path():
+    from bulbi.spec import SpecParser
+
+    with pytest.raises(SpecError, match="mount.path is required"):
+        SpecParser().parse({"box": {"name": "x"}, "mount": [{"mode": "read-only"}]})
+
+
+def test_profile_cannot_add_mount(sample_toml: Path):
+    from bulbi.spec import ProfileSpec
+
+    spec = SpecLoader().load(sample_toml)
+    with pytest.raises(SpecError, match="adds mount '/etc' not in root"):
+        ProfileMerger().merge(spec, ProfileSpec(mounts={"/etc": "read-only"}))
+
+
+def test_profile_rejects_invalid_mount_mode(sample_toml: Path):
+    from bulbi.spec import ProfileSpec
+
+    spec = SpecLoader().load(sample_toml)
+    with pytest.raises(SpecError, match="invalid mount mode 'execute'"):
+        ProfileMerger().merge(spec, ProfileSpec(mounts={".": "execute"}))
+
+
+def test_profile_violations_reports_every_widening(sample_toml: Path):
+    from bulbi.spec import NetworkSpec, ProfileSpec, ToolsSpec
+
+    spec = SpecLoader().load(sample_toml)
+    profile = ProfileSpec(
+        tools=ToolsSpec(allow=["curl"]),
+        network=NetworkSpec(allow=["evil.com"]),
+        mounts={"~/docs": "read-write"},
+    )
+    assert list(ProfileMerger().violations(spec, profile)) == [
+        "widens tools: ['curl'] not in root",
+        "widens network: ['evil.com'] not in root",
+        "widens mount '~/docs' from read-only to read-write",
+    ]
+
+
+def test_merge_keeps_unrelated_sections(sample_toml: Path):
+    spec = SpecLoader().load(sample_toml)
+    narrowed = ProfileMerger().resolve(spec, "test-runner")
+    assert narrowed.network == spec.network
+    assert narrowed.mounts == spec.mounts
+    assert narrowed.box == spec.box
