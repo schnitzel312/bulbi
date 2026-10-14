@@ -197,7 +197,27 @@ def test_idle_watcher_is_installed_and_stops_after_timeout():
     dockerfile = _dockerfile(_spec())
     assert "base64 -d > /usr/local/bin/bulbi-idle-watcher" in dockerfile
     script = IdleWatcherScript().render()
-    assert 'grep -qsxz "$marker" /proc/[0-9]*/environ' in script
+    assert 'grep -qsxz "$marker" "$proc/environ"' in script
     assert "marker='BULBI_EXEC=session'" in script
-    assert 'if [ "$idle" -ge "$timeout" ]; then exit 0; fi' in script
+    assert 'if [ "$idle" -ge "$timeout" ]; then' in script
     assert 'if [ "$timeout" -le 0 ]; then continue; fi' in script  # 0 = CLI stops the box
+
+
+def test_idle_watcher_counts_only_session_leaders_review_minor_3():
+    """A backgrounded child inherits BULBI_EXEC=session; only docker exec's own process
+    (PPID 0 inside the container) may keep the box alive."""
+    from bulbi.image.entrypoint import IdleWatcherScript
+
+    script = IdleWatcherScript().render()
+    assert 'rest="${stat##*) }"' in script
+    assert '[ "$2" = 0 ] || continue' in script
+
+
+def test_idle_watcher_honours_a_recent_attach_before_exiting_review_minor_2():
+    from bulbi.image.entrypoint import ATTACH_MARKER_PATH, IdleWatcherScript
+
+    script = IdleWatcherScript().render()
+    assert ATTACH_MARKER_PATH in script
+    assert "recently_attached" in script
+    # The final decision re-checks both sessions and the attach marker.
+    assert script.index("recently_attached") < script.index("exit 0\n")

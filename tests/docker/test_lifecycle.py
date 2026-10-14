@@ -78,10 +78,13 @@ def test_concurrent_runs_share_one_box_and_gateway_then_stop_with_idle_zero(
 ):
     name = box_name("share")
     write_spec(project, name, allow=["pypi.org"], idle="0")
-    first = spawn(project, "run", "--", "sleep", "15")
-    second = spawn(project, "run", "--", "sleep", "15")
+    # Sessions hold until the test has seen both, however long cold image builds take.
+    release = project / "release"
+    hold = f"for i in $(seq 300); do [ -e {release} ] && exit 0; sleep 1; done; exit 1"
+    first = spawn(project, "run", "--", "sh", "-c", hold)
+    second = spawn(project, "run", "--", "sh", "-c", hold)
     try:
-        assert wait_for(lambda: sessions(docker_client, name) == 2, timeout=240), containers(
+        assert wait_for(lambda: sessions(docker_client, name) == 2, timeout=280), containers(
             docker_client, name
         )
         found = containers(docker_client, name)
@@ -90,6 +93,7 @@ def test_concurrent_runs_share_one_box_and_gateway_then_stop_with_idle_zero(
         row = next(line for line in listing.splitlines() if found["box"].name in line)
         assert " 2 " in row
     finally:
+        release.write_text("")
         first.wait(timeout=120)
         second.wait(timeout=120)
     assert first.returncode == second.returncode == 0, (first.stdout.read(), second.stdout.read())
@@ -100,15 +104,22 @@ def test_concurrent_runs_share_one_box_and_gateway_then_stop_with_idle_zero(
 
 
 def test_box_stops_itself_after_the_idle_timeout(docker_client, project):
+    """A live session longer than the timeout keeps the box up; a process it leaves in the
+    background does not (review MINOR-3)."""
     name = box_name("idle")
     write_spec(project, name, allow=["pypi.org"], idle="1m")
-    assert bulbi(project, "run", "--", "true").returncode == 0
+    session = "nohup sleep 600 >/dev/null 2>&1 & sleep 75; echo SESSION-DONE"
+    result = bulbi(project, "run", "--", "sh", "-c", session)
+    assert result.returncode == 0 and "SESSION-DONE" in result.stdout, (
+        result.stdout + result.stderr
+    )
     box = containers(docker_client, name)["box"]
     box.reload()
     assert box.status == "running"
     started = time.monotonic()
     assert wait_for(lambda: (box.reload(), box.status)[1] == "exited", timeout=150, interval=5)
-    assert 50 <= time.monotonic() - started <= 150
+    # The watcher checks every 30 s, so it stops within timeout +/- one check interval.
+    assert 25 <= time.monotonic() - started <= 150
 
 
 def test_spec_change_during_a_session_refuses_the_next_run(docker_client, project):

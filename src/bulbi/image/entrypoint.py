@@ -14,6 +14,8 @@ IDLE_WATCHER_PATH = "/usr/local/bin/bulbi-idle-watcher"
 SESSION_MARKER_ENV = "BULBI_EXEC"
 SESSION_MARKER_VALUE = "session"
 IDLE_CHECK_SECONDS = 30
+ATTACH_MARKER_PATH = f"{CONTAINER_HOME}/.bulbi-attached"
+ATTACH_GRACE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -58,9 +60,13 @@ class EntrypointScript:
 class IdleWatcherScript:
     """The box's PID 1: exits (stopping the box) after ``$1`` seconds without sessions.
 
-    A session is any process carrying ``BULBI_EXEC=session`` in its environment (every
-    ``docker exec`` session sets it and its children inherit it). ``0`` disables the
-    watcher; the CLI then stops the box when the last session ends (spec §8.3).
+    A session is a ``docker exec`` process carrying ``BULBI_EXEC=session``. Only session
+    *leaders* count (PPID 0 inside the container), so a process an agent backgrounds,
+    which inherits the variable, cannot keep the box alive forever. Before exiting, the
+    watcher re-checks for sessions and honours a recent attach marker (touched by the
+    CLI under its lock right before a new session starts), closing the race between its
+    scan and a session that is just attaching. ``0`` disables the watcher; the CLI then
+    stops the box when the last session ends (spec §8.3).
     """
 
     def render(self) -> str:
@@ -72,16 +78,41 @@ class IdleWatcherScript:
             'if [ "$timeout" -gt 0 ] && [ "$timeout" -lt "$interval" ]; then',
             '    interval="$timeout"',
             "fi",
+            f"marker='{SESSION_MARKER_ENV}={SESSION_MARKER_VALUE}'",
+            "",
+            "has_session() {",
+            "    local proc stat rest",
+            "    for proc in /proc/[0-9]*; do",
+            '        read -r stat < "$proc/stat" 2>/dev/null || continue',
+            '        rest="${stat##*) }"',
+            "        set -- $rest",
+            '        [ "$2" = 0 ] || continue',
+            '        grep -qsxz "$marker" "$proc/environ" && return 0',
+            "    done",
+            "    return 1",
+            "}",
+            "",
+            "recently_attached() {",
+            "    local touched",
+            f'    touched=$(stat -c %Y "{ATTACH_MARKER_PATH}" 2>/dev/null) || return 1',
+            f"    [ $(( $(date +%s) - touched )) -lt {ATTACH_GRACE_SECONDS} ]",
+            "}",
+            "",
             "idle=0",
             "while true; do",
             '    sleep "$interval" & wait $!',
             '    if [ "$timeout" -le 0 ]; then continue; fi',
-            f"    marker='{SESSION_MARKER_ENV}={SESSION_MARKER_VALUE}'",
-            '    if grep -qsxz "$marker" /proc/[0-9]*/environ; then',
+            "    if has_session; then",
             "        idle=0",
-            "    else",
-            "        idle=$((idle + interval))",
-            '        if [ "$idle" -ge "$timeout" ]; then exit 0; fi',
+            "        continue",
+            "    fi",
+            "    idle=$((idle + interval))",
+            '    if [ "$idle" -ge "$timeout" ]; then',
+            "        if has_session || recently_attached; then",
+            "            idle=0",
+            "            continue",
+            "        fi",
+            "        exit 0",
             "    fi",
             "done",
             "",

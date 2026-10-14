@@ -27,6 +27,7 @@ from bulbi.gateway.config import GatewayConfig, HostAccess
 from bulbi.gateway.policy import NetworkPolicy
 from bulbi.gateway.relay import relay_ports
 from bulbi.image import ImageBuilder
+from bulbi.image.entrypoint import ATTACH_MARKER_PATH
 from bulbi.image.gateway import GatewayImageBuilder
 from bulbi.project.locator import Project
 from bulbi.sandbox.hashing import SpecHasher
@@ -141,6 +142,8 @@ class BoxOrchestrator:
             observation = self._observe()
             plan = self._services.planner.plan(observation, spec_hash)
             box = self._apply(plan, observation, policy, box_image, gateway_image, spec_hash)
+            # Under the lock: tell the idle watcher a session is about to attach.
+            box.handle.exec(["touch", ATTACH_MARKER_PATH])
             self._check_late_worktree(plan)
             # Files are (re)written on every attach so rotated values are picked up.
             self._services.secret_deliveries.write_files(self._secrets, box.handle)

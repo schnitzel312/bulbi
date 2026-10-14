@@ -634,3 +634,11 @@ def test_gateway_can_redirect_dns_sent_to_any_resolver(tmp_path, client, service
     _orchestrator(Project.plain(tmp_path), services).ensure()
     gateway, _ = _run_kwargs(client)
     assert gateway["sysctls"] == {"net.ipv4.conf.all.route_localnet": "1"}
+
+
+def test_every_ensure_touches_the_attach_marker_review_minor_2(tmp_path, client, services):
+    project = Project.plain(tmp_path)
+    box = client.containers.get(_orchestrator(project, services).ensure().id)
+    _orchestrator(project, services).ensure()
+    touches = [argv for argv, _ in box.exec_calls if argv[:1] == ["touch"]]
+    assert touches == [["touch", "/home/bulbi/.bulbi-attached"]] * 2
