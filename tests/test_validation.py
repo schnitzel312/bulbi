@@ -1,5 +1,7 @@
 """Tests for spec validation."""
 
+import pytest
+
 from bulbi.spec import (
     BoxSpec,
     BulbiSpec,
@@ -164,9 +166,20 @@ def test_secret_warning_does_not_claim_the_secret_is_injected():
     assert "available to all proxied requests" not in warning
 
 
-def test_unknown_secret_source_is_kept_for_the_rule_to_report():
+@pytest.mark.parametrize("source", ["vault", ["env"], {"x": 1}, 7])
+def test_unknown_secret_source_is_kept_for_the_rule_to_report(source):
     from bulbi.spec import SecretSource
 
     assert SecretSpec(from_source="env").from_source is SecretSource.ENV
-    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="vault", hosts=["a"])})
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source=source, hosts=["a"])})
     assert validate_spec(spec).errors == ["secret 'KEY': only 'env' source is supported in v1"]
+
+
+def test_non_string_secret_source_from_toml_is_a_validation_error(tmp_path):
+    from bulbi.spec import SpecLoader
+
+    (tmp_path / "bulbi.toml").write_text(
+        'spec = "0.1"\n[box]\nname = "x"\n[secrets]\nK = { from = ["env"], hosts = ["a"] }\n'
+    )
+    result = validate_spec(SpecLoader().load(tmp_path))
+    assert result.errors == ["secret 'K': only 'env' source is supported in v1"]

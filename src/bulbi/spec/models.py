@@ -96,14 +96,16 @@ class SecretSpec:
 
     Secrets are parsed and validated only; Bulbi does not inject them anywhere yet.
     ``from_source`` is coerced to :class:`SecretSource` when recognised and otherwise
-    kept as the raw string, so validation can report an unsupported source.
+    kept as the raw value (whatever its type), so validation can report it.
     """
 
     from_source: SecretSource | str
     hosts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.from_source in {source.value for source in SecretSource}:
+        # Raw TOML may hold any type here (e.g. a list); only strings can name a source.
+        source: object = self.from_source
+        if isinstance(source, str) and source in {member.value for member in SecretSource}:
             object.__setattr__(self, "from_source", SecretSource(self.from_source))
 
 
