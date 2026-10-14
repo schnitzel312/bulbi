@@ -8,7 +8,7 @@ from pathlib import Path
 
 import docker
 
-from bulbi.agents import get_agent_config
+from bulbi.agents import AgentRegistry
 from bulbi.constants import CONTAINER_HOME, CONTAINER_USER, CONTAINER_WORKSPACE, DOCKER_LABEL
 from bulbi.spec import BulbiSpec
 from bulbi.tools import BASE_PACKAGES, ToolRegistry
@@ -24,7 +24,7 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
     """
     tools = ToolRegistry.builtin()
     resolved = tools.resolve_all(spec.tools.allow)
-    agent_config = get_agent_config(spec.box.agent)
+    agent_config = AgentRegistry.builtin().resolve(spec.box.agent)
 
     # Collect all apt packages (deduplicated, stable order).
     seen: set[str] = set()
@@ -40,8 +40,8 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
                 packages.append(pkg)
 
     # The agent may need additional system packages (e.g. node for claude).
-    if agent_config:
-        for dep_name in agent_config.requires:
+    if agent_config.install_commands:
+        for dep_name in agent_config.required_tools:
             already_have = any(t.name == dep_name for t in resolved)
             if not already_have:
                 dep_tool = tools.resolve(dep_name)
@@ -69,8 +69,8 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
             lines.append("")
 
     # Install the agent runtime.
-    if agent_config:
-        for dep_name in agent_config.requires:
+    if agent_config.install_commands:
+        for dep_name in agent_config.required_tools:
             already_have = any(t.name == dep_name for t in resolved)
             if not already_have:
                 dep_tool = tools.resolve(dep_name)
@@ -81,13 +81,13 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
                     lines.append("")
 
         lines.append(f"# Install agent: {spec.box.agent}")
-        for cmd in agent_config.install_cmds:
+        for cmd in agent_config.install_commands:
             lines.append(f"RUN {cmd}")
         lines.append("")
 
-        for key, value in agent_config.env.items():
+        for key, value in agent_config.environment.items():
             lines.append(f"ENV {key}={value}")
-        if agent_config.env:
+        if agent_config.environment:
             lines.append("")
 
     # Create non-root user and configure pip.

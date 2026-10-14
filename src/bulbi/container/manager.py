@@ -4,28 +4,24 @@ from __future__ import annotations
 
 import glob as globmod
 import hashlib
-import json
 import os
 import platform
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import docker
 import docker.types
 
-from bulbi.agents import AgentConfig, get_agent_config, get_claude_credentials_json
+from bulbi.agents import Agent, AgentRegistry
 from bulbi.constants import (
-    CONTAINER_HOME,
-    CONTAINER_USER,
     CONTAINER_WORKSPACE,
     DOCKER_LABEL,
     DOCKER_LABEL_BOX,
     SPEC_FILENAME,
 )
+from bulbi.container.execution import DockerContainerExecutor
 from bulbi.image import build_image
 from bulbi.spec import BulbiSpec, ProfileMerger
 
@@ -79,115 +75,6 @@ def _detect_git_worktree(project_root: Path) -> Path | None:
 def _is_tty() -> bool:
     """Check if stdin/stdout are connected to a terminal."""
     return sys.stdin.isatty() and sys.stdout.isatty()
-
-
-# ---------------------------------------------------------------------------
-# Agent config injection
-# ---------------------------------------------------------------------------
-
-def _inject_claude_config(container: Any, env: dict[str, str]) -> None:
-    """Copy Claude Code config and credentials into a running container.
-
-    Injects three files so Claude Code starts without interactive prompts:
-    - ~/.claude.json — onboarding state, workspace trust, dismissed notices
-    - ~/.claude/settings.json — skipDangerousModePermissionPrompt
-    - ~/.claude/.credentials.json — subscription OAuth tokens (when no API key)
-    """
-    _inject_claude_settings(container)
-    _inject_claude_user_config(container)
-
-    if "ANTHROPIC_API_KEY" not in env:
-        _inject_claude_credentials(container)
-
-
-def _inject_claude_user_config(container: Any) -> None:
-    """Write ~/.claude.json with host config + sandbox overrides."""
-    claude_json_path = Path("~/.claude.json").expanduser()
-    config: dict = {}
-    if claude_json_path.is_file():
-        config = json.loads(claude_json_path.read_text())
-
-    # Detect installed version to mark release notes as seen.
-    version_result = container.exec_run(
-        ["claude", "--version"], user=CONTAINER_USER,
-    )
-    if version_result.exit_code == 0:
-        installed_version = version_result.output.decode().strip().split()[0]
-    else:
-        installed_version = config.get("lastReleaseNotesSeen", "99.99.99")
-
-    config.update({
-        "hasCompletedOnboarding": True,
-        "numStartups": max(config.get("numStartups", 0), 9999),
-        "lastReleaseNotesSeen": installed_version,
-        "migrationVersion": max(config.get("migrationVersion", 0), 9999),
-    })
-
-    projects = config.get("projects", {})
-    projects[CONTAINER_WORKSPACE] = {
-        **projects.get(CONTAINER_WORKSPACE, {}),
-        "hasTrustDialogAccepted": True,
-    }
-    config["projects"] = projects
-
-    _write_file_in_container(
-        container, f"{CONTAINER_HOME}/.claude.json", json.dumps(config),
-    )
-
-
-def _inject_claude_settings(container: Any) -> None:
-    """Write ~/.claude/settings.json with host settings + sandbox overrides."""
-    settings_path = Path("~/.claude/settings.json").expanduser()
-    settings: dict = {}
-    if settings_path.is_file():
-        settings = json.loads(settings_path.read_text())
-
-    settings["skipDangerousModePermissionPrompt"] = True
-
-    _write_file_in_container(
-        container,
-        f"{CONTAINER_HOME}/.claude/settings.json",
-        json.dumps(settings),
-        mkdir=True,
-    )
-
-
-def _inject_claude_credentials(container: Any) -> None:
-    """Write OAuth credentials from the host keychain into the container."""
-    creds_json = get_claude_credentials_json()
-    if not creds_json:
-        return
-
-    _write_file_in_container(
-        container,
-        f"{CONTAINER_HOME}/.claude/.credentials.json",
-        creds_json,
-        mkdir=True,
-        mode="600",
-    )
-
-
-def _write_file_in_container(
-    container: Any,
-    path: str,
-    content: str,
-    *,
-    mkdir: bool = False,
-    mode: str | None = None,
-) -> None:
-    """Write a file inside the container via exec."""
-    escaped = shlex.quote(content)
-    parts = []
-    if mkdir:
-        parent = str(Path(path).parent)
-        parts.append(f"mkdir -p {parent}")
-    parts.append(f"echo {escaped} > {path}")
-    if mode:
-        parts.append(f"chmod {mode} {path}")
-    container.exec_run(
-        ["bash", "-c", " && ".join(parts)],
-        user=CONTAINER_USER,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +137,7 @@ def _build_mounts(
 
 def _build_environment(
     spec: BulbiSpec,
-    agent_config: AgentConfig | None,
+    agent: Agent,
     proxy_port: int,
 ) -> dict[str, str]:
     """Build the container environment dict."""
@@ -263,13 +150,8 @@ def _build_environment(
         "https_proxy": proxy_url,
     }
 
-    if agent_config:
-        env.update(agent_config.env)
-
-        for var in agent_config.api_key_vars:
-            val = os.environ.get(var)
-            if val:
-                env[var] = val
+    env.update(agent.environment)
+    env.update(agent.api_keys_from(os.environ))
 
     return env
 
@@ -291,8 +173,8 @@ def start_box(
     container_name = f"bulbi-{box_name}-{_short_hash(str(project_root))}"
 
     mounts = _build_mounts(spec, project_root)
-    agent_config = get_agent_config(spec.box.agent)
-    env = _build_environment(spec, agent_config, proxy_port)
+    agent = AgentRegistry.builtin().resolve(spec.box.agent)
+    env = _build_environment(spec, agent, proxy_port)
 
     # Remove any stale container with the same name.
     try:
@@ -317,8 +199,7 @@ def start_box(
     )
 
     # Inject agent config so it skips onboarding and picks up host auth.
-    if spec.box.agent == "claude":
-        _inject_claude_config(container, env)
+    agent.prepare_container(DockerContainerExecutor(container), env)
 
     return container.id
 

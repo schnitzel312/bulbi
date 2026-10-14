@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from bulbi.agents import get_agent_config
+from bulbi.agents import AgentRegistry
 
 
 # Domain allowlists per ecosystem.
@@ -115,8 +115,7 @@ def generate_starter_spec(project_root: Path) -> str:
 
     tools_list = ", ".join(f'"{t}"' for t in info["tools"])
     # Combine ecosystem registry domains with agent-required domains.
-    agent_config = get_agent_config("claude")
-    agent_domains = agent_config.domains if agent_config else []
+    agent_domains = list(AgentRegistry.builtin().resolve("claude").domains)
     all_domains = list(info["network_allow"]) + agent_domains
     network_allow = ", ".join(f'"{d}"' for d in all_domains)
 

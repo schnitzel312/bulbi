@@ -154,8 +154,7 @@ def _run_in_sandbox(
     status_msg: str = "Running",
 ) -> int:
     """Build image, start proxy + container, run a command, then clean up."""
-    from bulbi.agents import get_agent_config
-    from bulbi.container import run_in_box, start_box, stop_box
+    from bulbi.container.manager import run_in_box, start_box, stop_box
     from bulbi.image import build_image
     from bulbi.log import ensure_log_dir, get_log_path
     from bulbi.proxy import AllowlistProxy
@@ -217,18 +216,10 @@ def _load_and_resolve(profile: str | None) -> tuple[BulbiSpec, Path]:
 @click.argument("command", nargs=-1)
 def run(profile: str | None, command: tuple[str, ...]) -> None:
     """Build the sandbox and run a command (default: the configured agent)."""
-    from bulbi.agents import get_agent_config
+    from bulbi.agents import AgentRegistry
 
     spec, project_root = _load_and_resolve(profile)
-
-    if command:
-        cmd = list(command)
-    else:
-        agent_config = get_agent_config(spec.box.agent)
-        if agent_config:
-            cmd = list(agent_config.command)
-        else:
-            cmd = [spec.box.agent]
+    cmd = list(command or AgentRegistry.builtin().resolve(spec.box.agent).launch_command)
 
     exit_code = _run_in_sandbox(spec, project_root, cmd, status_msg="Running")
     raise SystemExit(exit_code)
@@ -291,7 +282,7 @@ def log_cmd(denied: bool) -> None:
 @main.command("ls")
 def ls_cmd() -> None:
     """List all running bulbi containers."""
-    from bulbi.container import list_boxes
+    from bulbi.container.manager import list_boxes
 
     boxes = list_boxes()
 
@@ -325,7 +316,7 @@ def ls_cmd() -> None:
 @click.argument("container")
 def rm(container: str) -> None:
     """Remove a bulbi container by name or ID."""
-    from bulbi.container import remove_box
+    from bulbi.container.manager import remove_box
 
     try:
         remove_box(container)
@@ -343,7 +334,7 @@ def rm(container: str) -> None:
 @click.confirmation_option(prompt="This will remove ALL bulbi containers and images. Continue?")
 def reset() -> None:
     """Remove all bulbi containers and images."""
-    from bulbi.container import reset_boxes
+    from bulbi.container.manager import reset_boxes
 
     try:
         reset_boxes()
