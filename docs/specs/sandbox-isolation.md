@@ -127,7 +127,7 @@ Pinning works per IP. If an allowed name and a non-allowed name share a CDN IP, 
 - Excludes that match a directory are masked with an empty read-only tmpfs (fixes the start failure).
 
 ## 4. Lifecycle (`SandboxSession`)
-Start, in order (each step registered for teardown first):
+Start, in order, when §8 decides a new box is needed (each step registered for teardown first):
 1. Create the dedicated network.
 2. On Linux, if there are `host:` rules, start the host relay.
 3. Start the gateway and wait until it reports its rules are loaded (health file; timeout 10 s → `SandboxError`).
@@ -212,3 +212,165 @@ The same suite in blacklist mode (`default="allow"`, `deny=["example.com"]`):
 - **Private/local destinations are allowed only through explicit address or `host` rules.**
 - **Blacklist mode is supported but labelled best effort;** whitelist is the strong mode.
 - **One gateway container per running box**, plus a host relay on Linux only when `host:` rules exist.
+
+## 8. One shared box per project (multi-session)
+
+**Goal:** all agent and shell sessions for a project run in **one** box (plus its one gateway), each in its own terminal. A different project gets its own box. No container sprawl.
+
+### 8.1 Identity
+- **Box key: the project, not the folder.**
+  - In a git repo, the project is the repository: the realpath of `git rev-parse --git-common-dir`. Every worktree of the same repo maps to the same box (§9).
+  - Outside git, the project is the resolved project root.
+  - The profile is part of the key, because a read-only profile can't share a box with read-write sessions.
+- **Names:**
+  - box: `bulbi-<box.name>-<hash(project)>[-<profile>]`;
+  - gateway: the same name + `-gw`.
+  - Labels: `bulbi.project`, `bulbi.profile`, `bulbi.spec_hash`.
+- **Spec hash:** covers the image, mounts, network policy, limits and agent.
+
+### 8.2 Attach-or-create (`bulbi run`, `bulbi shell`)
+1. Take an exclusive lock on `.bulbi/box.lock` (`fcntl.flock`) so two terminals starting at once can't race.
+2. Find the box by labels, then:
+   - **Running, same spec hash:** attach. Agent `refresh()` (credentials only, never overwriting files a live session may be writing).
+   - **Stopped, same spec hash:** start it again (gateway first). Setup state in the box is preserved, so setup commands don't re-run. Then attach.
+   - **Different spec hash (`bulbi.toml` changed):**
+     - no active sessions: recreate box + gateway;
+     - active sessions: refuse with "box is running an older spec with N active sessions; finish them or run `bulbi restart`". New policy must never silently not apply.
+   - **Missing:** create it (full start sequence, §4). Agent `prepare()` runs once per container start.
+3. Release the lock, then `docker exec -it` the session. Each session is a separate `docker exec`, so any number of terminals can run at once.
+
+### 8.3 Session tracking and shutdown
+- **Active sessions are counted from Docker itself:** running exec instances on the box (`ExecIDs` → `exec_inspect().Running`), excluding Bulbi's own setup execs (each carries env `BULBI_EXEC=session`). This is crash-proof: if a terminal or the CLI is killed, its exec ends and stops counting.
+- **When a session ends,** the CLI (under the lock) checks the count. If it's zero, the box becomes idle.
+- **The idle policy** is `[box] idle_timeout` in `bulbi.toml`, default `"10m"`, with `"0"` meaning stop immediately.
+  - **The box shuts itself down:** its PID 1 is a small Bulbi idle watcher, replacing `sleep infinity`. It checks every 30 s and exits once there have been no session processes for `idle_timeout`, which stops the box.
+  - **The gateway** is stopped by the CLI after the last session when the timeout is 0. Otherwise the next Bulbi command reaps any gateway whose box is stopped, and `ls` shows it.
+  - **Stopped boxes are kept, not removed**, so a restart is fast and setup state survives. They use no CPU or RAM. `bulbi rm` / `bulbi reset` remove them.
+- **Commands:**
+  - `bulbi ls`: project, profile, state, **active sessions**, uptime, idle time.
+  - `bulbi stop [--all]`: stop this project's box + gateway. Asks first if sessions are active.
+  - `bulbi restart`: stop then start with the current spec (asks first if sessions are active).
+
+### 8.4 Tests
+- **Unit (fakes):**
+  - attach to a running box with the same hash; restart a stopped box;
+  - recreate on hash change with no sessions; refuse on hash change with sessions;
+  - lock serialises concurrent starts (two threads → one create);
+  - session count ignores setup execs;
+  - the gateway is stopped only when the last session leaves;
+  - profiles map to distinct boxes.
+- **Docker suite:**
+  - two concurrent `bulbi run -- sleep 5` → exactly one box + one gateway, two sessions in `ls`;
+  - after both exit with `idle_timeout="0"` → both stopped;
+  - with `"1m"` the box stops itself after about 1 min;
+  - editing `bulbi.toml` while a session runs → the next `run` refuses with the restart hint.
+
+## 9. Git worktrees: one box for all worktrees of a repo
+
+**Goal:** run several agents in parallel, each in its own worktree of the same repo, all inside the project's single box and all under the same policy.
+
+### 9.1 Same paths inside and outside
+- **Mount at the host path:** every project directory is mounted at **its exact host path** inside the box (e.g. `/Users/ariel/Code/bulbi` → `/Users/ariel/Code/bulbi`), instead of `/home/bulbi/workspace`.
+  - Git's absolute links (a worktree's `.git` file → `<main>/.git/worktrees/<name>`, and back) then just work.
+  - The `.git-main` mount hack is removed.
+  - Paths in agent output match the host.
+- **Working directory:** a session starts in the worktree where `bulbi run` was invoked (`docker exec -w <host path>`). One box, many terminals, each in its own worktree.
+- `bulbi run` from **any** worktree attaches to the same box (§8.2).
+
+### 9.2 What gets mounted
+At box creation, Bulbi reads `git worktree list --porcelain` and mounts:
+1. **The main checkout** (it holds the shared `.git`).
+2. **Worktree containers:** if every entry in a worktree's parent directory is a worktree of this repo (e.g. `~/.superset/worktrees/bulbi/`), that whole parent directory is mounted. Worktrees created there later appear in the running box with no restart.
+3. **Scattered worktrees:** otherwise each worktree is mounted individually. A parent like `~/Code` that holds unrelated projects is **never** mounted. Worktrees created later in such places need `bulbi restart`, and `bulbi run` from one says so.
+4. **Explicit dirs:** `[project] worktree_dirs = ["~/.superset/worktrees/bulbi"]` mounts extra worktree container dirs. Explicit dirs are validated: `check` errors if they contain anything other than worktrees of this repo.
+
+**Which mode and excludes apply:** the `[[mount]] path = "."` rule (mode and excludes) applies to the main checkout **and every worktree**. Other `[[mount]]` entries are unchanged.
+
+### 9.3 Policy comes from the main checkout
+- The box's spec is **the main checkout's `bulbi.toml`**. A branch's own copy is ignored, and `run` warns if it differs. An agent on a branch therefore can't loosen the policy by editing its worktree's spec.
+- `.bulbi/` (lock, audit log) lives in the main checkout.
+- These are mounted **read-only in every mounted checkout:**
+  - `bulbi.toml`;
+  - the shared `.git/hooks` and `.git/config`;
+  - each worktree's `config.worktree`.
+
+  `.git/objects`, refs and `.git/worktrees/*` stay writable, so commits, branches and `git worktree add` (inside a mounted worktree dir) work.
+
+### 9.4 Excludes on worktrees that appear later
+Bind-mount excludes are fixed when the box starts. When a session attaches from a worktree that wasn't present at box start:
+- if it contains files matching an exclude pattern (e.g. `.env`), the session is **refused** with "this worktree has excluded files that the running box can't hide; run `bulbi restart` when the other sessions finish";
+- otherwise it is allowed, with the same documented limitation as today: secrets created on the host after start aren't hidden.
+
+### 9.5 Agent configuration
+- **Claude trust:** `ClaudeAgent.prepare()` marks the main checkout and each worktree container dir as trusted in `~/.claude.json`.
+- **New worktrees:** `refresh()` adds trust for a newly seen worktree path with an atomic read-modify-write of that single key.
+- The docker suite verifies that Claude starts without a trust prompt in a worktree created after box start.
+
+### 9.6 Tests
+- **Unit:**
+  - the project key is the same from the main checkout and from every worktree;
+  - mount planning in each case: a dedicated parent dir, scattered worktrees, refusal to mount a mixed parent, `worktree_dirs` validation;
+  - host-path targets; read-only overlays in every checkout;
+  - spec taken from the main checkout, with the differing-spec warning;
+  - the late-worktree exclude refusal.
+- **Docker:**
+  1. Two worktrees plus `bulbi run` from each gives one box and two sessions, each with the right cwd.
+  2. `git commit` works in both.
+  3. A worktree added after start in the dedicated dir is usable without a restart.
+  4. Writing `.git/hooks/*` or `bulbi.toml` from any worktree fails.
+
+## 10. Secrets
+
+**Goal:** give the box exactly the credentials it needs (agent logins, API tokens, config files) through one declarative mechanism. Every secret that enters the box is visible in `bulbi check`.
+
+### 10.1 Format: one line per secret under `[secrets]`
+```toml
+[secrets]
+GITHUB_TOKEN = { from = "env" }
+OPENAI_KEY   = { from = "env", source = "MY_OPENAI_KEY" }
+NPM_TOKEN    = { from = "command", source = "op read op://dev/npm/token" }
+NPM_RC       = { from = "file", source = "~/.npmrc", to = "file", path = "~/.npmrc" }
+SENTRY_DSN   = { from = "keychain", source = "sentry-dsn", to = "file", path = "~/.config/sentry/dsn" }
+```
+| Key | Values | Default | Meaning |
+|---|---|---|---|
+| `from` | `env` · `file` · `keychain` · `command` | required | Where Bulbi reads the value on the host. `keychain` is the macOS Keychain (`security find-generic-password -s <source> -w`). `command` runs on the host via argv split, with no shell, a 10 s timeout and stdout trimmed. |
+| `source` | string | the secret's name | Env var name / file path / keychain service / command line. |
+| `to` | `env` · `file` | `env` | How the box receives it: env var named after the secret, or a file. |
+| `path` | path in the box (`~` = box user's home) | required if `to = "file"` | File location. Mode `600`, owned by the box user. Must be under the box home (the existing `write_file` restriction). |
+
+- **Inline tables are the documented style;** `bulbi init`, the docs and the examples use it. `[secrets.NAME]` tables parse to the same data and stay accepted for compatibility.
+- **The old `hosts` key** is accepted but ignored with a warning until `to = "inject"` exists (§10.4).
+
+### 10.2 Agents use the same mechanism
+- Each `Agent` declares its built-in secrets through the same model, replacing today's special-case code:
+  - `ClaudeAgent`: `CLAUDE_OAUTH` (keychain `Claude Code-credentials` → file `~/.claude/.credentials.json`, used only when no API key is present) and `ANTHROPIC_API_KEY` (env → env, optional);
+  - `CodexAgent`: `OPENAI_API_KEY`.
+- **Missing values:**
+  - an optional built-in secret is simply skipped;
+  - a missing **user-declared** secret is an error at `run`, with a message naming the secret and its source.
+- **Conflicts:** a user entry with the same name overrides the agent's built-in one.
+
+### 10.3 Delivery and visibility
+- **Never in the image:** secrets are never baked into the image and never in the spec hash.
+- **Delivery:** at box start, via env (`docker exec -e`, per session) or `put_archive` files.
+- **Refresh:** re-read and refreshed on every session attach (§8.2), so rotated tokens are picked up. Files are rewritten atomically.
+- **No secret values anywhere in Bulbi's output:** never logged, never in the audit log, never in error messages (secret values are redacted).
+- **`bulbi check` lists them** in a "Secrets entering the box" table: name, from/source, to/path, and whether the value is currently available on the host (✓/✗). It never shows values.
+- **Threat model, stated in `check` output and the docs:** the agent can read the secrets it is given. The network policy limits where it can send them.
+
+### 10.4 Future (not this phase): `to = "inject"`
+The gateway adds the secret to requests for the listed `hosts` via TLS interception (a per-box CA trusted only inside the box), so the agent never sees the value. Specced separately.
+
+### 10.5 Tests
+- **Unit:**
+  - parsing the inline and table forms, and defaults;
+  - every validation error: unknown `from`/`to`, missing `path`, a path outside home;
+  - each source reader with fakes (env, file, keychain, command incl. timeout and failure);
+  - built-in agent secrets and user override;
+  - redaction in errors;
+  - `check` table output.
+- **Docker:**
+  - an env secret visible as `$NAME` in a session;
+  - a file secret at its path with mode 600;
+  - a rotated host value picked up by the next session.
