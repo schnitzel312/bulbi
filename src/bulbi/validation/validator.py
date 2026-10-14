@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
+from bulbi.project.locator import Project
 from bulbi.spec import BulbiSpec
 from bulbi.tools import ToolRegistry
 from bulbi.validation.base import ValidationResult, ValidationRule
 from bulbi.validation.rules import (
     AllowModeWithoutDenyRule,
+    BroadMountRule,
     DenyEqualsAllowRule,
+    DockerSocketMountRule,
     EmptyAllowlistRule,
     HostWithoutPortRule,
+    IdleTimeoutRule,
     InterpreterToolsRule,
     KnownToolsRule,
     MountsPresentRule,
@@ -22,6 +27,7 @@ from bulbi.validation.rules import (
     SecretHostsRule,
     SecretSourceRule,
     WidePrivateRangeRule,
+    WorktreeDirsRule,
     WritableMountRule,
 )
 
@@ -33,13 +39,21 @@ class SpecValidator:
         self._rules = tuple(rules)
 
     @classmethod
-    def default(cls, tools: ToolRegistry) -> SpecValidator:
-        """The built-in rule set, in the order issues are reported."""
+    def default(
+        cls, tools: ToolRegistry, project: Project | None = None, home: Path | None = None
+    ) -> SpecValidator:
+        """The built-in rule set, in the order issues are reported.
+
+        ``project`` and ``home`` resolve mount paths for the filesystem rules.
+        """
         return cls(
             [
                 KnownToolsRule(tools),
                 MountsPresentRule(),
                 WritableMountRule(),
+                DockerSocketMountRule(project, home),
+                BroadMountRule(project, home),
+                WorktreeDirsRule(project, home),
                 RuleSyntaxRule(),
                 DenyEqualsAllowRule(),
                 OpenNetworkRule(),
@@ -51,6 +65,7 @@ class SpecValidator:
                 SecretSourceRule(),
                 SecretHostsRule(),
                 ResourceLimitsRule(),
+                IdleTimeoutRule(),
                 InterpreterToolsRule(),
             ]
         )

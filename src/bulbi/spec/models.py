@@ -9,11 +9,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TypeVar
 
-from bulbi.constants import DEFAULT_AGENT, DEFAULT_CPU, DEFAULT_MEMORY
+from bulbi.constants import DEFAULT_AGENT, DEFAULT_CPU, DEFAULT_IDLE_TIMEOUT, DEFAULT_MEMORY
 from bulbi.errors import SpecError
 
 _CONTENT_HASH_LENGTH = 16
 _MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$")
+_DURATION_PATTERN = re.compile(r"^(\d+)\s*([smh]?)$")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600}
 _MEMORY_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
@@ -41,10 +43,28 @@ class SecretSource(StrEnum):
 
 @dataclass(frozen=True)
 class BoxSpec:
-    """Identity of the box: its name and which agent it runs."""
+    """Identity of the box, which agent it runs, and how long it lingers when idle."""
 
     name: str
     agent: str = DEFAULT_AGENT
+    idle_timeout: str = DEFAULT_IDLE_TIMEOUT
+
+    def idle_timeout_seconds(self) -> int:
+        """``idle_timeout`` (``"0"``, ``"90s"``, ``"10m"``, ``"2h"``) in seconds."""
+        match = _DURATION_PATTERN.match(str(self.idle_timeout).strip().lower())
+        if not match:
+            raise SpecError(
+                f"box.idle_timeout must look like '0', '30s', '10m' or '1h', "
+                f"got '{self.idle_timeout}'"
+            )
+        return int(match.group(1)) * _DURATION_UNITS[match.group(2) or "s"]
+
+
+@dataclass(frozen=True)
+class ProjectSpec:
+    """How the project's checkouts are found (git worktrees, §9)."""
+
+    worktree_dirs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -150,6 +170,7 @@ class BulbiSpec:
     secrets: dict[str, SecretSpec] = field(default_factory=dict)
     limits: LimitsSpec = field(default_factory=LimitsSpec)
     profiles: dict[str, ProfileSpec] = field(default_factory=dict)
+    project: ProjectSpec = field(default_factory=ProjectSpec)
 
     def content_hash(self) -> str:
         """Short hash of everything that affects the built image."""

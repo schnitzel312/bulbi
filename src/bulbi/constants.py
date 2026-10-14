@@ -16,10 +16,16 @@ DOCKER_LABEL = "bulbi"
 DOCKER_LABEL_VALUE = "true"
 DOCKER_LABEL_BOX = "bulbi.box"
 DOCKER_LABEL_ROLE = "bulbi.role"
+DOCKER_LABEL_PROJECT = "bulbi.project"
+DOCKER_LABEL_PROFILE = "bulbi.profile"
+DOCKER_LABEL_SPEC_HASH = "bulbi.spec_hash"
 GATEWAY_ROLE = "gateway"
 
 # Agent launched when the spec does not name one.
 DEFAULT_AGENT = "claude"
+
+# How long an idle box keeps running before its watcher stops it.
+DEFAULT_IDLE_TIMEOUT = "10m"
 
 # Default resource limits.
 DEFAULT_CPU = 2

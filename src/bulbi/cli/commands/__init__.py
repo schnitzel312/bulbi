@@ -8,9 +8,11 @@ from bulbi.cli.commands.init import InitCommand
 from bulbi.cli.commands.log import LogCommand
 from bulbi.cli.commands.ls import ListCommand
 from bulbi.cli.commands.reset import ResetCommand
+from bulbi.cli.commands.restart import RestartCommand
 from bulbi.cli.commands.rm import RemoveCommand
 from bulbi.cli.commands.run import RunCommand
 from bulbi.cli.commands.shell import ShellCommand
+from bulbi.cli.commands.stop import StopCommand
 
 #: Every registered subcommand. Add new BulbiCommand instances here.
 COMMANDS: tuple[BulbiCommand, ...] = (
@@ -20,6 +22,8 @@ COMMANDS: tuple[BulbiCommand, ...] = (
     ShellCommand(),
     LogCommand(),
     ListCommand(),
+    StopCommand(),
+    RestartCommand(),
     RemoveCommand(),
     ResetCommand(),
 )

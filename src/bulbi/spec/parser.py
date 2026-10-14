@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from bulbi.constants import DEFAULT_AGENT, DEFAULT_CPU, DEFAULT_MEMORY, SPEC_VERSION
+from bulbi.constants import (
+    DEFAULT_AGENT,
+    DEFAULT_CPU,
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MEMORY,
+    SPEC_VERSION,
+)
 from bulbi.errors import SpecError
 from bulbi.spec.models import (
     BoxSpec,
@@ -15,6 +21,7 @@ from bulbi.spec.models import (
     NetworkDefault,
     NetworkSpec,
     ProfileSpec,
+    ProjectSpec,
     SecretSource,
     SecretSpec,
     SetupSpec,
@@ -42,6 +49,9 @@ class SpecParser:
             profiles={
                 name: self._parse_profile(entry) for name, entry in raw.get("profiles", {}).items()
             },
+            project=ProjectSpec(
+                worktree_dirs=list(raw.get("project", {}).get("worktree_dirs", []))
+            ),
         )
 
     @staticmethod
@@ -55,7 +65,11 @@ class SpecParser:
     def _parse_box(raw: RawTable) -> BoxSpec:
         if not raw.get("name"):
             raise SpecError("box.name is required")
-        return BoxSpec(name=raw["name"], agent=raw.get("agent", DEFAULT_AGENT))
+        return BoxSpec(
+            name=raw["name"],
+            agent=raw.get("agent", DEFAULT_AGENT),
+            idle_timeout=str(raw.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)),
+        )
 
     @staticmethod
     def _parse_tools(raw: RawTable) -> ToolsSpec:

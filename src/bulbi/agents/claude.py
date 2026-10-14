@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from bulbi.agents.base import Agent
 from bulbi.agents.credentials import CredentialProvider, KeychainCredentialProvider
-from bulbi.agents.ports import ContainerHandle
-from bulbi.constants import CONTAINER_HOME, CONTAINER_WORKSPACE
+from bulbi.agents.ports import BoxContext, ContainerHandle
+from bulbi.constants import CONTAINER_HOME
 
 API_KEY_VAR = "ANTHROPIC_API_KEY"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -66,23 +66,31 @@ class ClaudeAgent(Agent):
         self._credentials = credentials or KeychainCredentialProvider.for_host(KEYCHAIN_SERVICE)
         self._host_home = host_home
 
-    def prepare_container(
-        self, container: ContainerHandle, environment: Mapping[str, str]
-    ) -> None:
+    def prepare_container(self, container: ContainerHandle, context: BoxContext) -> None:
         container.write_file(_in_container_home(SETTINGS_FILE), json.dumps(self._settings()))
         container.write_file(
             _in_container_home(USER_CONFIG_FILE),
-            json.dumps(self._user_config(self._installed_version(container))),
+            json.dumps(
+                self._user_config(self._installed_version(container), context.project_dirs)
+            ),
         )
-        if API_KEY_VAR not in environment:
+        if API_KEY_VAR not in context.environment:
             self._write_credentials(container)
+
+    def refresh(self, container: ContainerHandle, context: BoxContext) -> None:
+        """Renew credentials and trust newly seen checkouts; nothing else is touched."""
+        if API_KEY_VAR not in context.environment:
+            self._write_credentials(container)
+        self._trust_new_dirs(container, context.project_dirs)
 
     def _settings(self) -> JsonObject:
         settings = self._read_host_json(SETTINGS_FILE)
         settings["skipDangerousModePermissionPrompt"] = True
         return settings
 
-    def _user_config(self, installed_version: str | None) -> JsonObject:
+    def _user_config(
+        self, installed_version: str | None, trusted_dirs: Sequence[str]
+    ) -> JsonObject:
         config = self._read_host_json(USER_CONFIG_FILE)
         config.update(
             {
@@ -93,12 +101,21 @@ class ClaudeAgent(Agent):
                 "migrationVersion": max(config.get("migrationVersion", 0), _SEEN_EVERYTHING_COUNT),
             }
         )
-        projects = config.setdefault("projects", {})
-        projects[CONTAINER_WORKSPACE] = {
-            **projects.get(CONTAINER_WORKSPACE, {}),
-            "hasTrustDialogAccepted": True,
-        }
+        _mark_trusted(config, trusted_dirs)
         return config
+
+    @staticmethod
+    def _trust_new_dirs(container: ContainerHandle, trusted_dirs: Sequence[str]) -> None:
+        """Read-modify-write ``~/.claude.json`` only if a directory is not trusted yet."""
+        path = _in_container_home(USER_CONFIG_FILE)
+        result = container.exec(["cat", path])
+        try:
+            config = json.loads(result.output) if result.succeeded else {}
+        except json.JSONDecodeError:
+            return  # Claude may be mid-write; leave it alone rather than clobber it.
+        if not isinstance(config, dict) or not _mark_trusted(config, trusted_dirs):
+            return
+        container.write_file(path, json.dumps(config))
 
     @staticmethod
     def _installed_version(container: ContainerHandle) -> str | None:
@@ -122,6 +139,18 @@ class ClaudeAgent(Agent):
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
+
+
+def _mark_trusted(config: JsonObject, directories: Sequence[str]) -> bool:
+    """Mark ``directories`` trusted in a ``~/.claude.json`` object; True if anything changed."""
+    projects = config.setdefault("projects", {})
+    changed = False
+    for directory in directories:
+        entry = projects.get(directory, {})
+        if not entry.get("hasTrustDialogAccepted"):
+            projects[directory] = {**entry, "hasTrustDialogAccepted": True}
+            changed = True
+    return changed
 
 
 def _in_container_home(relative_path: str) -> str:

@@ -8,6 +8,7 @@ import pytest
 
 from bulbi.agents import (
     AgentRegistry,
+    BoxContext,
     ClaudeAgent,
     CodexAgent,
     ExecResult,
@@ -18,6 +19,7 @@ from bulbi.agents import (
 from tests.fakes import FakeContainerHandle, StaticCredentials
 
 HOME = "/home/bulbi"
+PROJECT = "/Users/me/code/app"
 
 
 @pytest.fixture
@@ -63,7 +65,7 @@ def test_api_keys_from_host_env_skips_unset_and_empty():
 
 def test_default_prepare_container_does_nothing():
     container = FakeContainerHandle()
-    CodexAgent().prepare_container(container, {})
+    CodexAgent().prepare_container(container, BoxContext())
     assert container.commands == []
 
 
@@ -73,7 +75,7 @@ def test_claude_writes_settings_and_user_config(host_home: Path):
     )
     agent = ClaudeAgent(credentials=StaticCredentials(None), host_home=host_home)
 
-    agent.prepare_container(container, {"ANTHROPIC_API_KEY": "sk"})
+    agent.prepare_container(container, BoxContext({"ANTHROPIC_API_KEY": "sk"}, (PROJECT,)))
 
     files = container.files
     settings = json.loads(files[f"{HOME}/.claude/settings.json"])
@@ -82,14 +84,14 @@ def test_claude_writes_settings_and_user_config(host_home: Path):
     assert config["hasCompletedOnboarding"] is True
     assert config["numStartups"] == 9999
     assert config["lastReleaseNotesSeen"] == "2.1.0"
-    assert config["projects"][f"{HOME}/workspace"] == {"hasTrustDialogAccepted": True}
+    assert config["projects"][PROJECT] == {"hasTrustDialogAccepted": True}
 
 
 def test_claude_skips_credentials_when_api_key_is_forwarded(host_home: Path):
     credentials = StaticCredentials('{"token": "t"}')
     container = FakeContainerHandle()
     ClaudeAgent(credentials=credentials, host_home=host_home).prepare_container(
-        container, {"ANTHROPIC_API_KEY": "sk"}
+        container, BoxContext({"ANTHROPIC_API_KEY": "sk"})
     )
     assert credentials.reads == 0
     assert f"{HOME}/.claude/.credentials.json" not in container.files
@@ -99,7 +101,7 @@ def test_claude_injects_credentials_with_private_mode(host_home: Path):
     container = FakeContainerHandle()
     ClaudeAgent(
         credentials=StaticCredentials('{"token": "t"}'), host_home=host_home
-    ).prepare_container(container, {})
+    ).prepare_container(container, BoxContext())
     target = f"{HOME}/.claude/.credentials.json"
     assert container.files[target] == '{"token": "t"}'
     assert container.modes[target] == 0o600
@@ -109,7 +111,7 @@ def test_claude_version_falls_back_to_host_config(tmp_path: Path):
     (tmp_path / ".claude.json").write_text(json.dumps({"lastReleaseNotesSeen": "1.0.0"}))
     container = FakeContainerHandle({("claude", "--version"): ExecResult(1, "not found")})
     ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).prepare_container(
-        container, {}
+        container, BoxContext()
     )
     config = json.loads(container.files[f"{HOME}/.claude.json"])
     assert config["lastReleaseNotesSeen"] == "1.0.0"
@@ -119,7 +121,7 @@ def test_claude_tolerates_missing_or_malformed_host_config(tmp_path: Path):
     (tmp_path / ".claude.json").write_text("{not json")
     container = FakeContainerHandle()
     ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).prepare_container(
-        container, {}
+        container, BoxContext()
     )
     config = json.loads(container.files[f"{HOME}/.claude.json"])
     assert config["lastReleaseNotesSeen"] == "99.99.99"
@@ -159,3 +161,43 @@ def test_for_host_only_uses_keychain_on_macos():
         KeychainCredentialProvider.for_host("svc", "Darwin"), KeychainCredentialProvider
     )
     assert isinstance(KeychainCredentialProvider.for_host("svc", "Linux"), NoCredentialProvider)
+
+
+# ---- refresh() on attach (spec §8.2, §9.5) ------------------------------------------------
+
+CLAUDE_JSON = f"{HOME}/.claude.json"
+
+
+def test_refresh_trusts_a_new_worktree_keeping_everything_else(tmp_path: Path):
+    existing = {"numStartups": 9999, "projects": {PROJECT: {"hasTrustDialogAccepted": True}}}
+    container = FakeContainerHandle({("cat", CLAUDE_JSON): ExecResult(0, json.dumps(existing))})
+    agent = ClaudeAgent(credentials=StaticCredentials('{"t": 1}'), host_home=tmp_path)
+    agent.refresh(container, BoxContext({}, (PROJECT, "/Users/me/wt/new")))
+    config = json.loads(container.files[CLAUDE_JSON])
+    assert config["numStartups"] == 9999
+    assert config["projects"]["/Users/me/wt/new"] == {"hasTrustDialogAccepted": True}
+    assert container.files[f"{HOME}/.claude/.credentials.json"] == '{"t": 1}'
+    assert f"{HOME}/.claude/settings.json" not in container.files  # never rewritten on attach
+
+
+def test_refresh_writes_nothing_when_everything_is_trusted(tmp_path: Path):
+    existing = {"projects": {PROJECT: {"hasTrustDialogAccepted": True}}}
+    container = FakeContainerHandle({("cat", CLAUDE_JSON): ExecResult(0, json.dumps(existing))})
+    ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).refresh(
+        container, BoxContext({"ANTHROPIC_API_KEY": "sk"}, (PROJECT,))
+    )
+    assert container.files == {}
+
+
+def test_refresh_never_clobbers_a_half_written_config(tmp_path: Path):
+    container = FakeContainerHandle({("cat", CLAUDE_JSON): ExecResult(0, '{"projects": {')})
+    ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).refresh(
+        container, BoxContext({"ANTHROPIC_API_KEY": "sk"}, (PROJECT,))
+    )
+    assert CLAUDE_JSON not in container.files
+
+
+def test_default_refresh_does_nothing():
+    container = FakeContainerHandle()
+    CodexAgent().refresh(container, BoxContext())
+    assert container.commands == [] and container.files == {}

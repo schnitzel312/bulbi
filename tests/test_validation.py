@@ -228,3 +228,83 @@ def test_host_without_port_warning():
     assert any("allows every port on your machine" in w for w in warnings)
     warnings = validate_spec(_make_spec(network=_network(allow=["host:5432"]))).warnings
     assert not any("every port" in w for w in warnings)
+
+
+# ---- Filesystem and box rules (spec §3.6, §8.3, §9.2) --------------------------------------
+
+
+def _with_mounts(*paths: str) -> BulbiSpec:
+    return _make_spec(mounts=[MountSpec(path=p) for p in paths])
+
+
+def _fs_validate(spec, tmp_path, project=None):
+    from bulbi.project import Project
+
+    return SpecValidator.default(
+        ToolRegistry.builtin(), project or Project.plain(tmp_path), home=tmp_path / "home"
+    ).validate(spec)
+
+
+def _socket_errors(tmp_path, path: str) -> list[str]:
+    result = _fs_validate(_with_mounts(".", path), tmp_path)
+    return [e for e in result.errors if "Docker socket" in e]
+
+
+def test_docker_socket_mounts_are_errors(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "docker.sock").write_text("")
+    desktop = tmp_path / "home" / ".docker" / "run"
+    desktop.mkdir(parents=True)
+    (desktop / "docker.sock").write_text("")
+    for path in ("/var/run/docker.sock", str(tmp_path / "run"), "~/.docker/run", "~/.docker", "~"):
+        assert _socket_errors(tmp_path, path), path
+
+
+def test_known_socket_locations_only_count_when_a_socket_exists(tmp_path):
+    (tmp_path / "home" / ".docker" / "run").mkdir(parents=True)
+    assert _socket_errors(tmp_path, "~/.docker") == []
+    assert _socket_errors(tmp_path, "~") == []
+
+
+def test_mounting_root_home_or_above_warns(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    for path in ("/", "~", str(tmp_path)):
+        warnings = _fs_validate(_with_mounts(".", path), tmp_path).warnings
+        assert any("whole home directory" in w for w in warnings), path
+    assert not any(
+        "whole home" in w for w in _fs_validate(_with_mounts("~/docs"), tmp_path).warnings
+    )
+
+
+def test_worktree_dirs_must_only_hold_worktrees(tmp_path):
+    from bulbi.project import ProjectLocator
+    from bulbi.spec import ProjectSpec
+    from tests.repos import add_worktree, make_repo
+
+    repo = make_repo(tmp_path / "app")
+    add_worktree(repo, tmp_path / "trees" / "a", "a")
+    project = ProjectLocator().locate(repo)
+    good = _make_spec(project=ProjectSpec(worktree_dirs=[str(tmp_path / "trees")]))
+    assert _fs_validate(good, tmp_path, project).ok
+    (tmp_path / "trees" / "notes").mkdir()
+    errors = _fs_validate(good, tmp_path, project).errors
+    trees = tmp_path / "trees"
+    assert errors == [
+        f"project.worktree_dirs entry '{trees}' must contain only worktrees of this repository"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"), [("0", 0), ("90s", 90), ("10m", 600), ("2h", 7200), ("15", 15)]
+)
+def test_idle_timeout_values(value, seconds):
+    assert BoxSpec(name="x", idle_timeout=value).idle_timeout_seconds() == seconds
+    assert validate_spec(_make_spec(box=BoxSpec(name="x", idle_timeout=value))).ok
+
+
+def test_malformed_idle_timeout_is_an_error():
+    result = validate_spec(_make_spec(box=BoxSpec(name="x", idle_timeout="soon")))
+    assert result.errors == [
+        "box.idle_timeout must look like '0', '30s', '10m' or '1h', got 'soon'"
+    ]

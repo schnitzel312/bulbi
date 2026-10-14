@@ -10,12 +10,13 @@ from bulbi.agents.credentials import (
     KeychainCredentialProvider,
     NoCredentialProvider,
 )
-from bulbi.agents.ports import ContainerHandle, ExecResult
+from bulbi.agents.ports import BoxContext, ContainerHandle, ExecResult
 from bulbi.agents.registry import AgentRegistry
 
 __all__ = [
     "Agent",
     "AgentRegistry",
+    "BoxContext",
     "ClaudeAgent",
     "CodexAgent",
     "ContainerHandle",

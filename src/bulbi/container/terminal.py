@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from bulbi.constants import ENTRYPOINT_PATH
 
@@ -30,8 +30,18 @@ class TerminalExec:
         self._run = runner
         self._is_terminal = is_terminal
 
-    def run(self, container_id: str, command: Sequence[str]) -> int:
+    def run(
+        self,
+        container_id: str,
+        command: Sequence[str],
+        workdir: str | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> int:
         """Run ``command`` via the entrypoint (so setup runs first); return its exit code."""
-        tty_flags = ["-it"] if self._is_terminal() else []
-        argv = ["docker", "exec", *tty_flags, container_id, ENTRYPOINT_PATH, *command]
+        options = ["-it"] if self._is_terminal() else []
+        if workdir:
+            options += ["-w", workdir]
+        for key, value in (environment or {}).items():
+            options += ["-e", f"{key}={value}"]
+        argv = ["docker", "exec", *options, container_id, ENTRYPOINT_PATH, *command]
         return self._run(argv).returncode

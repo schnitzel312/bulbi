@@ -27,8 +27,14 @@ def test_write_file_streams_content_as_tar_owned_by_sandbox_user():
     ((directory, archive),) = container.archives
     member, content = _extract(archive)
     assert directory == "/home/bulbi/my dir"
-    assert (member.name, member.mode, member.uid, member.gid) == ("$x.json", 0o600, 1000, 1000)
+    temporary = ".$x.json.bulbi-tmp"
+    assert (member.name, member.mode, member.uid, member.gid) == (temporary, 0o600, 1000, 1000)
     assert content == b"it's"
+    # Atomic replace: readers never see a half-written file.
+    assert container.exec_calls[-1] == (
+        ["mv", "-f", f"/home/bulbi/my dir/{temporary}", "/home/bulbi/my dir/$x.json"],
+        "bulbi",
+    )
 
 
 def test_large_files_never_go_through_process_arguments():

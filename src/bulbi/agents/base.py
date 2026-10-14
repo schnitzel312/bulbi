@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from bulbi.agents.ports import ContainerHandle
+from bulbi.agents.ports import BoxContext, ContainerHandle
 
 
 class Agent(ABC):
@@ -46,13 +46,22 @@ class Agent(ABC):
         return {var: host_env[var] for var in self.api_key_vars if host_env.get(var)}
 
     def prepare_container(  # noqa: B027 - optional hook, intentionally a no-op by default
-        self, container: ContainerHandle, environment: Mapping[str, str]
+        self, container: ContainerHandle, context: BoxContext
     ) -> None:
-        """Hook run once the container is up, before the agent starts.
+        """Hook run once per container start, before any session runs.
 
         Args:
             container: Runs commands and writes files inside the freshly started box.
-            environment: The environment the container was started with.
+            context: The session environment and the project's checkout paths.
+        """
+
+    def refresh(  # noqa: B027 - optional hook, intentionally a no-op by default
+        self, container: ContainerHandle, context: BoxContext
+    ) -> None:
+        """Hook run when a session attaches to an already running box.
+
+        Live sessions may be using the box, so implementations must only update what is
+        safe to change underneath them (e.g. credentials, or one key of a config file).
         """
 
 

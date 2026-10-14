@@ -17,6 +17,7 @@ from bulbi.docker_sdk import docker_errors
 from bulbi.errors import SandboxError
 
 Clock = Callable[[], float]
+_TEMP_SUFFIX = ".bulbi-tmp"
 
 
 class DockerContainerHandle(ContainerHandle):
@@ -50,11 +51,14 @@ class DockerContainerHandle(ContainerHandle):
     def write_file(self, path: str, content: str, *, mode: int = DEFAULT_FILE_MODE) -> None:
         target = self._inside_home(path)
         self._require(self.exec(["mkdir", "-p", str(target.parent)]), f"create {target.parent}")
-        archive = self._single_file_archive(target.name, content.encode(), mode)
+        # Write a sibling temp file, then rename: readers never see a half-written file.
+        temporary = target.with_name(f".{target.name}{_TEMP_SUFFIX}")
+        archive = self._single_file_archive(temporary.name, content.encode(), mode)
         with docker_errors(f"failed to write {path} in container"):
             written = self._container.put_archive(str(target.parent), archive)
         if not written:
             raise SandboxError(f"failed to write {path} in container")
+        self._require(self.exec(["mv", "-f", str(temporary), str(target)]), f"replace {path}")
 
     def _inside_home(self, path: str) -> PurePosixPath:
         """``path`` normalised, provided it is a file strictly inside the home directory."""

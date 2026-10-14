@@ -17,8 +17,9 @@ from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
 from bulbi.gateway.config import HostAccess
-from bulbi.image import ImageBuilder
+from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.spec import SpecLoader
+from bulbi.tools import ToolRegistry
 from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
 
 SPEC = dedent("""\
@@ -41,6 +42,11 @@ SPEC = dedent("""\
     tools.allow = ["git"]
     network.allow = []
 """)
+
+
+def _tag_for(spec) -> str:
+    builder = ImageBuilder(FakeDocker(), DockerfileBuilder(ToolRegistry.builtin()))
+    return builder.tag_for(spec, ClaudeAgent(credentials=NoCredentialProvider()))
 
 
 class Harness:
@@ -146,20 +152,43 @@ def test_check_without_spec_fails_cleanly(cli: Harness):
 # ---- run / shell -------------------------------------------------------------
 
 
-def test_run_launches_agent_and_cleans_up(cli: Harness):
+def _containers(cli: Harness) -> list:
+    return list(
+        {id(c): c for c in cli.docker.containers.by_key.values() if not c.removed}.values()
+    )
+
+
+def test_run_launches_agent_and_leaves_the_shared_box_running(cli: Harness):
     cli.write_spec()
     cli.runner.returncode = 5
     result = cli.invoke("run")
 
     assert result.exit_code == 5
     assert "Building image for demo..." in result.output
+    assert "Starting network gateway..." in result.output
     assert "Starting container..." in result.output
     assert "Running: claude --dangerously-skip-permissions" in result.output
     assert cli.executed == [["claude", "--dangerously-skip-permissions"]]
     assert len(cli.docker.box_builds) == 1
-    containers = {id(c): c for c in cli.docker.containers.by_key.values()}.values()
-    assert len(containers) == 2  # box + gateway
-    assert all(container.removed for container in containers)
+    containers = _containers(cli)
+    assert len(containers) == 2  # box + gateway, kept for other sessions (idle_timeout 10m)
+    assert all(container.status == "running" for container in containers)
+
+
+def test_run_with_idle_timeout_zero_stops_box_and_gateway_after_the_session(cli: Harness):
+    cli.write_spec(SPEC.replace('agent = "claude"', 'agent = "claude"\nidle_timeout = "0"'))
+    assert cli.invoke("run").exit_code == 0
+    containers = _containers(cli)
+    assert len(containers) == 2
+    assert all(container.status == "exited" for container in containers)
+
+
+def test_second_run_attaches_to_the_same_box(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    result = cli.invoke("run", "--", "bash")
+    assert "Starting container..." not in result.output
+    assert len(cli.docker.containers.run_calls) == 2
 
 
 def test_run_with_explicit_command_and_profile(cli: Harness):
@@ -170,8 +199,7 @@ def test_run_with_explicit_command_and_profile(cli: Harness):
     # The profile was applied: its narrower tool list is what got built into the image.
     (build,) = cli.docker.box_builds
     assert "python3" not in build["dockerfile"]
-    root_spec = SpecLoader().load(cli.project_root)
-    assert build["tag"] != ImageBuilder.tag_for(root_spec)
+    assert build["tag"] != _tag_for(SpecLoader().load(cli.project_root))
 
 
 def test_run_unknown_profile_fails_before_docker(cli: Harness):
@@ -300,7 +328,7 @@ def test_reset_with_yes_removes_everything(cli: Harness):
 def test_image_tag_matches_spec_hash(cli: Harness):
     cli.write_spec()
     cli.invoke("run")
-    expected = ImageBuilder.tag_for(SpecLoader().load(cli.project_root))
+    expected = _tag_for(SpecLoader().load(cli.project_root))
     assert cli.docker.box_builds[0]["tag"] == expected
 
 
@@ -360,3 +388,120 @@ def test_check_describes_blacklist_mode(cli: Harness):
         "Blacklist (best effort). Any protocol to any public destination except 1 rule."
         in result.output
     )
+
+
+# ---- stop / restart / ls (spec §8.3) ------------------------------------------------------------
+
+
+def _box(cli: Harness):
+    return next(c for c in _containers(cli) if c.labels.get("bulbi.role") != "gateway")
+
+
+def test_stop_stops_box_and_gateway_but_keeps_them(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    result = cli.invoke("stop")
+    assert result.exit_code == 0 and "Stopped bulbi-demo-" in result.output
+    assert all(c.status == "exited" and not c.removed for c in _containers(cli))
+
+
+def test_stop_asks_before_ending_active_sessions(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    box = _box(cli)
+    box.attrs["ExecIDs"] = ["s"]
+    cli.docker.api.execs["s"] = {
+        "Running": True,
+        "ProcessConfig": {"entrypoint": "/entrypoint.sh"},
+    }
+    result = cli.invoke("stop", input="n\n")
+    assert result.exit_code == 1 and "1 active session(s) will be ended" in result.output
+    assert box.status == "running"
+    assert cli.invoke("stop", "--yes").exit_code == 0
+    assert box.status == "exited"
+
+
+def test_stop_all_stops_every_box(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    cli.invoke("run", "-p", "offline")
+    result = cli.invoke("stop", "--all")
+    assert "Stopped 2 box(es)." in result.output
+    assert all(c.status == "exited" for c in _containers(cli))
+
+
+def test_restart_recreates_the_box_with_the_current_spec(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    old_hash = _box(cli).labels["bulbi.spec_hash"]
+    cli.write_spec(SPEC.replace('allow = ["pypi.org"]', 'allow = ["pypi.org", "example.com"]'))
+    result = cli.invoke("restart")
+    assert result.exit_code == 0 and "Restarted bulbi-demo-" in result.output
+    assert _box(cli).labels["bulbi.spec_hash"] != old_hash
+    assert len(_containers(cli)) == 2
+
+
+def test_run_after_spec_change_with_live_session_is_refused(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    box = _box(cli)
+    box.attrs["ExecIDs"] = ["s"]
+    cli.docker.api.execs["s"] = {
+        "Running": True,
+        "ProcessConfig": {"entrypoint": "/entrypoint.sh"},
+    }
+    cli.write_spec(SPEC.replace('allow = ["pypi.org"]', 'allow = ["pypi.org", "example.com"]'))
+    result = cli.invoke("run")
+    assert result.exit_code == 1
+    assert (
+        "box is running an older spec with 1 active session; finish them or run `bulbi restart`"
+        in result.output
+    )
+
+
+def test_ls_shows_project_profile_state_and_sessions(cli: Harness):
+    cli.write_spec()
+    cli.invoke("run")
+    box = _box(cli)
+    box.attrs["ExecIDs"] = ["s"]
+    cli.docker.api.execs["s"] = {
+        "Running": True,
+        "ProcessConfig": {"entrypoint": "/entrypoint.sh"},
+    }
+    result = cli.invoke("ls")
+    assert box.name in result.output
+    assert str(cli.project_root.resolve()) in result.output
+    assert "running" in result.output
+    assert "-gw" not in result.output  # gateways stay hidden
+    row = next(line for line in result.output.splitlines() if box.name in line)
+    assert " 1 " in row
+
+
+def test_format_uptime():
+    from datetime import UTC, datetime
+
+    from bulbi.cli.commands.ls import format_uptime
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    assert format_uptime("2026-01-01T10:55:00Z", now) == "1h 05m"
+    assert format_uptime("2026-01-01T10:55:00.123456789Z", now) == "1h 04m"
+    assert format_uptime("2026-01-01T11:58:00Z", now) == "2m"
+    assert format_uptime(None, now) == "-"
+    assert format_uptime("garbage", now) == "-"
+
+
+def test_run_from_worktree_uses_main_spec_and_warns_when_its_copy_differs(tmp_path: Path):
+    from tests.repos import add_worktree, make_repo
+
+    repo = make_repo(tmp_path / "app")
+    (repo / "bulbi.toml").write_text(SPEC)
+    wt = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
+    (wt / "bulbi.toml").write_text(SPEC.replace('allow = ["pypi.org"]', 'allow = ["evil.test"]'))
+    harness = Harness(wt)
+    result = harness.invoke("run")
+    assert result.exit_code == 0
+    assert "This worktree's bulbi.toml differs from the main checkout's" in result.output
+    gateway_env = harness.docker.containers.run_calls[0][1]["environment"]
+    assert "evil.test" not in gateway_env["BULBI_GATEWAY_CONFIG"]
+    assert "pypi.org" in gateway_env["BULBI_GATEWAY_CONFIG"]
+    assert harness.runner.calls[0][harness.runner.calls[0].index("-w") + 1] == str(wt)

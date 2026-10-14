@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 from typing import Any
 
@@ -11,25 +12,29 @@ from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.image.dockerfile import DockerfileBuilder
 from bulbi.spec import BulbiSpec
 
+_TAG_HASH_LENGTH = 16
+
 
 class ImageBuilder:
     """Builds images through an injected Docker client, reusing any image already tagged.
 
-    The tag embeds :meth:`BulbiSpec.content_hash`, so an image is rebuilt exactly when
-    something that goes into it changes.
+    The tag embeds a hash of the rendered Dockerfile, so an image is rebuilt exactly when
+    its recipe changes.
     """
 
     def __init__(self, docker_client: Any, dockerfile: DockerfileBuilder) -> None:
         self._docker = docker_client
         self._dockerfile = dockerfile
 
-    @staticmethod
-    def tag_for(spec: BulbiSpec) -> str:
-        return f"bulbi/{spec.box.name}:{spec.content_hash()}"
+    def tag_for(self, spec: BulbiSpec, agent: Agent) -> str:
+        """``bulbi/<box name>:<hash of the Dockerfile>``."""
+        dockerfile = self._dockerfile.build(spec, agent)
+        digest = hashlib.sha256(dockerfile.encode()).hexdigest()[:_TAG_HASH_LENGTH]
+        return f"bulbi/{spec.box.name}:{digest}"
 
     def build(self, spec: BulbiSpec, agent: Agent) -> str:
         """Ensure the image for ``spec`` exists and return its tag."""
-        tag = self.tag_for(spec)
+        tag = self.tag_for(spec, agent)
         if self._exists(tag):
             return tag
         dockerfile = self._dockerfile.build(spec, agent)

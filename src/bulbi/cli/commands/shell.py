@@ -13,4 +13,5 @@ class ShellCommand(SandboxCommand):
     help = "Open an interactive bash shell inside the sandbox."
 
     def execute(self, app: AppContext, profile: str | None) -> None:
-        self.run_in_sandbox(app, app.load_spec(profile), SHELL_COMMAND, label="Opening shell")
+        spec = app.load_spec(profile)
+        self.run_in_sandbox(app, spec, SHELL_COMMAND, label="Opening shell", profile=profile)

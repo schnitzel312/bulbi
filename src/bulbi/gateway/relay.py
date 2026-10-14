@@ -11,11 +11,13 @@ Standard-library only.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import selectors
+import signal
 import socket
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from bulbi.errors import RuleError
 from bulbi.gateway.policy import NetworkPolicy
@@ -126,3 +128,23 @@ def _pump(first: socket.socket, second: socket.socket) -> None:
                     key.data.sendall(data)
                 except OSError:
                     return
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """``python -m bulbi.gateway.relay --bind IP --source IP --ports 5432,6379``."""
+    parser = argparse.ArgumentParser(prog="bulbi-relay")
+    parser.add_argument("--bind", required=True)
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--ports", required=True)
+    args = parser.parse_args(argv)
+    relay = HostRelay(args.bind, [int(port) for port in args.ports.split(",") if port])
+    relay.allow_source(args.source)
+    relay.start()
+    stopped = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+    stopped.wait()
+    relay.stop()
+
+
+if __name__ == "__main__":
+    main()

@@ -20,6 +20,5 @@ class RunCommand(SandboxCommand):
 
     def execute(self, app: AppContext, profile: str | None, command: tuple[str, ...]) -> None:
         spec = app.load_spec(profile)
-        self.run_in_sandbox(
-            app, spec, command or app.agent_for(spec).launch_command, label="Running"
-        )
+        command = command or app.agent_for(spec).launch_command
+        self.run_in_sandbox(app, spec, command, label="Running", profile=profile)

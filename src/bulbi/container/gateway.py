@@ -2,29 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bulbi.constants import (
-    DOCKER_LABEL,
-    DOCKER_LABEL_BOX,
-    DOCKER_LABEL_ROLE,
-    DOCKER_LABEL_VALUE,
-    GATEWAY_ROLE,
-)
+from bulbi.container.identity import GATEWAY_SUFFIX, BoxIdentity
+from bulbi.container.manager import RUNNING, ContainerState
 from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.errors import SandboxError
 from bulbi.gateway.config import CONFIG_ENV, LOG_MOUNT, READY_DIR, READY_FILE, GatewayConfig
-from bulbi.spec import BulbiSpec
 
 READY_TIMEOUT_SECONDS = 10.0
 _READY_POLL_SECONDS = 0.2
-_NAME_HASH_LENGTH = 8
 _STOP_TIMEOUT_SECONDS = 5
 _GATEWAY_CAPABILITIES = ["NET_ADMIN", "SETUID", "SETGID"]
 _GATEWAY_PIDS_LIMIT = 64
@@ -48,11 +40,6 @@ class RunningGateway:
     address: str | None  # The gateway container's address on the sandbox network.
 
 
-def _project_suffix(spec: BulbiSpec, project_root: Path) -> str:
-    project_hash = hashlib.sha256(str(project_root).encode()).hexdigest()[:_NAME_HASH_LENGTH]
-    return f"{spec.box.name}-{project_hash}"
-
-
 class GatewayManager:
     """Creates and removes the sandbox network and gateway through an injected Docker client."""
 
@@ -66,33 +53,37 @@ class GatewayManager:
         self._clock = clock
         self._sleep = sleep
 
-    @staticmethod
-    def network_name(spec: BulbiSpec, project_root: Path) -> str:
-        return f"bulbi-net-{_project_suffix(spec, project_root)}"
-
-    @staticmethod
-    def gateway_name(spec: BulbiSpec, project_root: Path) -> str:
-        return f"bulbi-gw-{_project_suffix(spec, project_root)}"
-
-    def _labels(self, spec: BulbiSpec) -> dict[str, str]:
-        return {
-            DOCKER_LABEL: DOCKER_LABEL_VALUE,
-            DOCKER_LABEL_BOX: spec.box.name,
-            DOCKER_LABEL_ROLE: GATEWAY_ROLE,
-        }
-
     # ---- network -----------------------------------------------------------------
 
-    def create_network(self, spec: BulbiSpec, project_root: Path) -> SandboxNetwork:
-        name = self.network_name(spec, project_root)
+    def find(self, identity: BoxIdentity) -> ContainerState | None:
+        with docker_errors(f"failed to inspect gateway {identity.gateway_name}"):
+            try:
+                return ContainerState.of(self._docker.containers.get(identity.gateway_name))
+            except docker_sdk().errors.NotFound:
+                return None
+
+    def find_network(self, identity: BoxIdentity) -> SandboxNetwork | None:
+        with docker_errors(f"failed to inspect network {identity.network_name}"):
+            try:
+                network = self._docker.networks.get(identity.network_name)
+            except docker_sdk().errors.NotFound:
+                return None
+        return self._network_of(network)
+
+    def create_network(self, identity: BoxIdentity) -> SandboxNetwork:
+        name = identity.network_name
         with docker_errors(f"failed to create network {name}"):
             self._remove_stale_network(name)
             network = self._docker.networks.create(
-                name, driver="bridge", labels=self._labels(spec), check_duplicate=True
+                name, driver="bridge", labels=identity.labels(), check_duplicate=True
             )
             network.reload()
+        return self._network_of(network)
+
+    @staticmethod
+    def _network_of(network: Any) -> SandboxNetwork:
         configs = network.attrs.get("IPAM", {}).get("Config") or [{}]
-        return SandboxNetwork(network.id, name, configs[0].get("Gateway"))
+        return SandboxNetwork(network.id, network.name, configs[0].get("Gateway"))
 
     def remove_network(self, network_id: str) -> None:
         with docker_errors(f"failed to remove network {network_id}"):
@@ -111,14 +102,14 @@ class GatewayManager:
 
     def start(
         self,
-        spec: BulbiSpec,
-        project_root: Path,
+        identity: BoxIdentity,
+        spec_hash: str,
         image_tag: str,
         network: SandboxNetwork,
         config: GatewayConfig,
         log_dir: Path,
     ) -> RunningGateway:
-        name = self.gateway_name(spec, project_root)
+        name = identity.gateway_name
         with docker_errors(f"failed to start gateway {name}"):
             with suppress(docker_sdk().errors.NotFound):
                 self._docker.containers.get(name).remove(force=True)
@@ -126,7 +117,7 @@ class GatewayManager:
                 image_tag,
                 detach=True,
                 name=name,
-                labels=self._labels(spec),
+                labels=identity.labels(spec_hash, gateway=True),
                 network=network.name,
                 environment={CONFIG_ENV: config.to_json()},
                 mounts=[
@@ -144,13 +135,26 @@ class GatewayManager:
                 init=True,
             )
             container.reload()
+        return self._running(container, network.name)
+
+    def ensure_running(self, gateway: ContainerState, network_name: str) -> RunningGateway:
+        """The gateway, started again if it was stopped (it reloads its rules on start)."""
+        with docker_errors(f"failed to start gateway {gateway.name}"):
+            container = self._docker.containers.get(gateway.id)
+            if container.status != RUNNING:
+                container.start()
+            container.reload()
+        return self._running(container, network_name)
+
+    @staticmethod
+    def _running(container: Any, network_name: str) -> RunningGateway:
         address = (
             container.attrs.get("NetworkSettings", {})
             .get("Networks", {})
-            .get(network.name, {})
+            .get(network_name, {})
             .get("IPAddress")
         )
-        return RunningGateway(container.id, name, address or None)
+        return RunningGateway(container.id, container.name, address or None)
 
     def wait_ready(self, gateway: RunningGateway, timeout: float = READY_TIMEOUT_SECONDS) -> None:
         """Block until the gateway has loaded its rules, or raise SandboxError."""
@@ -173,13 +177,33 @@ class GatewayManager:
                 self._sleep(_READY_POLL_SECONDS)
 
     def stop(self, gateway_id: str) -> None:
+        """Stop the gateway but keep it, so the box can be started again quickly."""
         with docker_errors(f"failed to stop gateway {gateway_id}"):
             try:
                 container = self._docker.containers.get(gateway_id)
             except docker_sdk().errors.NotFound:
                 return
-            container.stop(timeout=_STOP_TIMEOUT_SECONDS)
-            container.remove(force=True)
+            if container.status == RUNNING:
+                container.stop(timeout=_STOP_TIMEOUT_SECONDS)
+
+    def remove(self, gateway_id: str) -> None:
+        with docker_errors(f"failed to remove gateway {gateway_id}"):
+            try:
+                self._docker.containers.get(gateway_id).remove(force=True)
+            except docker_sdk().errors.NotFound:
+                return
+
+    def reap(self, containers: Iterable[ContainerState]) -> list[str]:
+        """Stop running gateways whose box is not running (spec §8.3); returns their names."""
+        states = list(containers)
+        running_boxes = {s.name for s in states if not s.is_gateway and s.running}
+        reaped = []
+        for state in states:
+            box_name = state.name.removesuffix(GATEWAY_SUFFIX)
+            if state.is_gateway and state.running and box_name not in running_boxes:
+                self.stop(state.id)
+                reaped.append(state.name)
+        return reaped
 
     @staticmethod
     def _logs(container: Any) -> str:

@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from bulbi.validation.rules.box import IdleTimeoutRule
+from bulbi.validation.rules.filesystem import (
+    BroadMountRule,
+    DockerSocketMountRule,
+    WorktreeDirsRule,
+)
 from bulbi.validation.rules.limits import ResourceLimitsRule
 from bulbi.validation.rules.mounts import MountsPresentRule, WritableMountRule
 from bulbi.validation.rules.network import (
@@ -19,9 +25,12 @@ from bulbi.validation.rules.tools import InterpreterToolsRule, KnownToolsRule
 
 __all__ = [
     "AllowModeWithoutDenyRule",
+    "BroadMountRule",
     "DenyEqualsAllowRule",
+    "DockerSocketMountRule",
     "EmptyAllowlistRule",
     "HostWithoutPortRule",
+    "IdleTimeoutRule",
     "InterpreterToolsRule",
     "KnownToolsRule",
     "MountsPresentRule",
@@ -32,5 +41,6 @@ __all__ = [
     "SecretHostsRule",
     "SecretSourceRule",
     "WidePrivateRangeRule",
+    "WorktreeDirsRule",
     "WritableMountRule",
 ]

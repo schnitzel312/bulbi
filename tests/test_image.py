@@ -108,7 +108,9 @@ def test_entrypoint_runs_setup_once_then_execs_command():
     script = EntrypointScript(["make deps", "make build"]).render()
     assert script.startswith("#!/bin/bash\nset -e\n")
     assert 'MARKER="/home/bulbi/.bulbi-setup-done"' in script
-    assert "    cd /home/bulbi/workspace\n    make deps\n    make build\n" in script
+    assert '(cd "${BULBI_PROJECT_DIR:-/home/bulbi/workspace}"' in script
+    assert "         make deps\n         make build\n        )" in script
+    assert "flock 9" in script  # concurrent first sessions run setup once
     assert script.endswith('exec "$@"\n')
 
 
@@ -128,7 +130,11 @@ def _image_builder(client: FakeDocker) -> ImageBuilder:
 
 def test_image_tag_uses_box_name_and_content_hash():
     spec = _spec()
-    assert ImageBuilder.tag_for(spec) == f"bulbi/demo:{spec.content_hash()}"
+    builder = _image_builder(FakeDocker())
+    tag = builder.tag_for(spec, CLAUDE)
+    assert tag.startswith("bulbi/demo:") and len(tag.split(":")[1]) == 16
+    other = _spec(tools=["git"])
+    assert builder.tag_for(other, CLAUDE) != tag  # a different Dockerfile, a different image
 
 
 def test_build_creates_labelled_image_when_missing():
@@ -142,8 +148,9 @@ def test_build_creates_labelled_image_when_missing():
 
 def test_build_reuses_existing_image():
     spec = _spec()
-    client = FakeDocker(images={ImageBuilder.tag_for(spec)})
-    assert _image_builder(client).build(spec, CLAUDE) == ImageBuilder.tag_for(spec)
+    tag = _image_builder(FakeDocker()).tag_for(spec, CLAUDE)
+    client = FakeDocker(images={tag})
+    assert _image_builder(client).build(spec, CLAUDE) == tag
     assert client.images.builds == []
 
 
@@ -182,3 +189,15 @@ def test_image_lookup_failure_becomes_sandbox_error():
     client.images.get = broken_get
     with pytest.raises(SandboxError, match="daemon hiccup"):
         _image_builder(client).build(_spec(), CLAUDE)
+
+
+def test_idle_watcher_is_installed_and_stops_after_timeout():
+    from bulbi.image.entrypoint import IdleWatcherScript
+
+    dockerfile = _dockerfile(_spec())
+    assert "base64 -d > /usr/local/bin/bulbi-idle-watcher" in dockerfile
+    script = IdleWatcherScript().render()
+    assert 'grep -qsxz "$marker" /proc/[0-9]*/environ' in script
+    assert "marker='BULBI_EXEC=session'" in script
+    assert 'if [ "$idle" -ge "$timeout" ]; then exit 0; fi' in script
+    assert 'if [ "$timeout" -le 0 ]; then continue; fi' in script  # 0 = CLI stops the box

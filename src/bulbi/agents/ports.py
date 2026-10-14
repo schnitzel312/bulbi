@@ -7,8 +7,8 @@ so agents never depend on container infrastructure.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 
 DEFAULT_FILE_MODE = 0o644
 
@@ -25,6 +25,20 @@ class ExecResult:
         return self.exit_code == 0
 
 
+@dataclass(frozen=True)
+class BoxContext:
+    """What an agent hook knows about the box it is configuring.
+
+    Attributes:
+        environment: The environment sessions run with.
+        project_dirs: Host paths of the project's checkouts (identical inside the box),
+            e.g. for marking them trusted.
+    """
+
+    environment: Mapping[str, str] = field(default_factory=dict)
+    project_dirs: tuple[str, ...] = ()
+
+
 class ContainerHandle(ABC):
     """A started box, seen from inside: run commands as the sandbox user and write its files."""
 
@@ -34,7 +48,7 @@ class ContainerHandle(ABC):
 
     @abstractmethod
     def write_file(self, path: str, content: str, *, mode: int = DEFAULT_FILE_MODE) -> None:
-        """Create or replace ``path`` and its parent directories, owned by the sandbox user.
+        """Atomically create or replace ``path`` (and parents), owned by the sandbox user.
 
         ``path`` must be absolute and inside the sandbox user's home directory; anything
         else raises :class:`~bulbi.errors.SandboxError`. Implementations may write with

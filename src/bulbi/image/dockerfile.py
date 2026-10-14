@@ -12,7 +12,7 @@ from bulbi.constants import (
     CONTAINER_WORKSPACE,
     ENTRYPOINT_PATH,
 )
-from bulbi.image.entrypoint import EntrypointScript
+from bulbi.image.entrypoint import IDLE_WATCHER_PATH, EntrypointScript, IdleWatcherScript
 from bulbi.spec import BulbiSpec
 from bulbi.tools import BASE_PACKAGES, ResolvedTool, ToolRegistry
 
@@ -98,11 +98,9 @@ class DockerfileBuilder:
 
     @staticmethod
     def _entrypoint_block(setup_commands: list[str]) -> Block:
-        # Base64 avoids having to escape the script for a Dockerfile RUN line.
-        script = EntrypointScript(setup_commands).render()
-        encoded = base64.b64encode(script.encode()).decode()
         return [
-            f"RUN echo '{encoded}' | base64 -d > {ENTRYPOINT_PATH} && chmod +x {ENTRYPOINT_PATH}"
+            _install_script(EntrypointScript(setup_commands).render(), ENTRYPOINT_PATH),
+            _install_script(IdleWatcherScript().render(), IDLE_WATCHER_PATH),
         ]
 
     @staticmethod
@@ -121,6 +119,12 @@ class DockerfileBuilder:
             f'ENTRYPOINT ["{ENTRYPOINT_PATH}"]',
             'CMD ["bash"]',
         ]
+
+
+def _install_script(script: str, path: str) -> str:
+    """A RUN line writing an executable script; base64 avoids Dockerfile escaping."""
+    encoded = base64.b64encode(script.encode()).decode()
+    return f"RUN echo '{encoded}' | base64 -d > {path} && chmod +x {path}"
 
 
 def _unique(items: Iterable[str]) -> list[str]:

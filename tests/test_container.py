@@ -1,4 +1,4 @@
-"""Tests for mount planning, container environment, terminal exec, and BoxManager."""
+"""Tests for mount planning, the box manager, session tracking and the terminal exec."""
 
 from pathlib import Path
 
@@ -6,74 +6,170 @@ import pytest
 
 from bulbi.agents import ClaudeAgent, NoCredentialProvider
 from bulbi.container.environment import EnvironmentBuilder
-from bulbi.container.manager import BoxInfo, BoxManager
-from bulbi.container.mounts import BindMount, MountPlanner
+from bulbi.container.identity import BoxIdentity
+from bulbi.container.manager import BoxLaunch, BoxManager, ContainerState
+from bulbi.container.mounts import BindMount, MountPlanner, TmpfsMount, is_worktree_container
+from bulbi.container.sessions import DockerSessionTracker
 from bulbi.container.terminal import TerminalExec
-from bulbi.errors import SandboxError
-from bulbi.spec import BoxSpec, BulbiSpec, LimitsSpec, MountSpec, ToolsSpec
+from bulbi.errors import SandboxError, SpecError
+from bulbi.project import Project, ProjectLocator
+from bulbi.spec import BoxSpec, BulbiSpec, LimitsSpec, MountSpec, ProjectSpec, ToolsSpec
 from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
+from tests.repos import add_worktree, make_repo
 
 WORKSPACE = "/home/bulbi/workspace"
 
 
-def _spec(mounts=(), limits=None) -> BulbiSpec:
+PROJECT_MOUNT = (MountSpec(path="."),)
+
+
+def _spec(mounts=PROJECT_MOUNT, limits=None, worktree_dirs=(), idle="10m") -> BulbiSpec:
     return BulbiSpec(
         spec_version="0.1",
-        box=BoxSpec(name="demo"),
+        box=BoxSpec(name="demo", idle_timeout=idle),
         tools=ToolsSpec(),
         mounts=list(mounts),
         limits=limits or LimitsSpec(),
+        project=ProjectSpec(worktree_dirs=list(worktree_dirs)),
     )
 
 
-# ---- MountPlanner -----------------------------------------------------------
+def _binds(plan) -> list[tuple[str, str, bool]]:
+    return [(m.source, m.target, m.read_only) for m in plan if isinstance(m, BindMount)]
 
 
-def test_project_mount_maps_to_workspace(tmp_path: Path):
-    plan = MountPlanner(tmp_path).plan(_spec([MountSpec(path=".")]))
-    assert plan == [BindMount(str(tmp_path.resolve()), WORKSPACE, read_only=False)]
+# ---- MountPlanner: plain projects ------------------------------------------------------
 
 
-def test_other_mounts_use_their_directory_name(tmp_path: Path):
+def test_plain_project_is_mounted_at_its_host_path(tmp_path: Path):
+    plan = MountPlanner(Project.plain(tmp_path)).plan(_spec())
+    root = str(tmp_path.resolve())
+    assert plan == [BindMount(root, root, read_only=False)]
+
+
+def test_other_mounts_keep_their_workspace_target(tmp_path: Path):
     docs = tmp_path / "docs"
     docs.mkdir()
-    plan = MountPlanner(tmp_path).plan(_spec([MountSpec(path=str(docs), mode="read-only")]))
-    assert plan == [BindMount(str(docs), f"{WORKSPACE}/docs", read_only=True)]
+    plan = MountPlanner(Project.plain(tmp_path)).plan(
+        _spec([MountSpec(path=str(docs), mode="read-only")])
+    )
+    assert plan == [BindMount(str(docs.resolve()), f"{WORKSPACE}/docs", read_only=True)]
 
 
-def test_existing_excluded_files_are_masked(tmp_path: Path):
+def test_excluded_files_are_masked_and_directories_get_a_tmpfs(tmp_path: Path):
     (tmp_path / ".env").write_text("SECRET=1")
-    (tmp_path / "a.pem").write_text("")
-    spec = _spec([MountSpec(path=".", exclude=[".env", "*.pem", "*.key"])])
-    masks = [m for m in MountPlanner(tmp_path).plan(spec) if m.source == "/dev/null"]
-    assert masks == [
-        BindMount("/dev/null", f"{WORKSPACE}/.env", read_only=True),
-        BindMount("/dev/null", f"{WORKSPACE}/a.pem", read_only=True),
-    ]
+    (tmp_path / "secrets").mkdir()
+    spec = _spec([MountSpec(path=".", exclude=[".env", "secrets", "*.key"])])
+    root = str(tmp_path.resolve())
+    plan = MountPlanner(Project.plain(tmp_path)).plan(spec)
+    assert BindMount("/dev/null", f"{root}/.env", True) in plan
+    assert TmpfsMount(f"{root}/secrets") in plan
 
 
 def test_spec_file_is_mounted_read_only(tmp_path: Path):
     (tmp_path / "bulbi.toml").write_text("")
-    plan = MountPlanner(tmp_path).plan(_spec())
-    assert plan == [BindMount(str(tmp_path / "bulbi.toml"), f"{WORKSPACE}/bulbi.toml", True)]
+    spec_file = str(tmp_path.resolve() / "bulbi.toml")
+    assert BindMount(spec_file, spec_file, True) in MountPlanner(Project.plain(tmp_path)).plan(
+        _spec()
+    )
 
 
-def test_git_worktree_mounts_main_repository(tmp_path: Path):
-    main_git = tmp_path / "repo" / ".git"
-    (main_git / "worktrees" / "wt").mkdir(parents=True)
-    project = tmp_path / "wt"
-    project.mkdir()
-    (project / ".git").write_text(f"gitdir: {main_git}/worktrees/wt\n")
-    plan = MountPlanner(project).plan(_spec())
-    assert plan == [BindMount(str(main_git.resolve()), f"{WORKSPACE}/.git-main", False)]
+def test_without_a_project_mount_nothing_of_the_project_is_mounted(tmp_path: Path):
+    (tmp_path / "bulbi.toml").write_text("")
+    assert MountPlanner(Project.plain(tmp_path)).plan(_spec(mounts=())) == []
 
 
-def test_regular_git_checkout_needs_no_extra_mount(tmp_path: Path):
-    (tmp_path / ".git").mkdir()
-    assert MountPlanner(tmp_path).plan(_spec()) == []
+# ---- MountPlanner: git worktrees (spec §9.2, §9.3) ----------------------------------------
 
 
-# ---- EnvironmentBuilder -----------------------------------------------------
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return make_repo(tmp_path / "code" / "app")
+
+
+def _project(cwd: Path) -> Project:
+    return ProjectLocator().locate(cwd)
+
+
+def test_dedicated_worktree_parent_is_mounted_whole(tmp_path, repo):
+    worktrees = tmp_path / "worktrees" / "app"
+    a = add_worktree(repo, worktrees / "a", "a")
+    add_worktree(repo, worktrees / "b", "b")
+    planner = MountPlanner(_project(a))
+    assert planner.checkout_roots(_spec()) == [repo, worktrees.resolve()]
+    binds = _binds(planner.plan(_spec()))
+    assert (str(worktrees.resolve()), str(worktrees.resolve()), False) in binds
+
+
+def test_scattered_worktrees_are_mounted_individually_never_their_mixed_parent(tmp_path, repo):
+    (tmp_path / "code" / "unrelated").mkdir()
+    sibling = add_worktree(repo, tmp_path / "code" / "app-feature", "feature")
+    roots = MountPlanner(_project(repo)).checkout_roots(_spec())
+    assert roots == [repo, sibling]
+    assert (tmp_path / "code").resolve() not in roots
+
+
+def test_parent_holding_the_main_checkout_is_never_mounted(tmp_path, repo):
+    sibling = add_worktree(repo, tmp_path / "code" / "app-wt", "wt")
+    assert MountPlanner(_project(repo)).checkout_roots(_spec()) == [repo, sibling]
+
+
+def test_worktree_dirs_are_mounted_whole(tmp_path, repo):
+    dedicated = tmp_path / "trees"
+    add_worktree(repo, dedicated / "x", "x")
+    spec = _spec(worktree_dirs=[str(dedicated)])
+    assert MountPlanner(_project(repo)).checkout_roots(spec) == [repo, dedicated.resolve()]
+
+
+def test_worktree_dirs_with_foreign_entries_are_refused(tmp_path, repo):
+    dedicated = tmp_path / "trees"
+    add_worktree(repo, dedicated / "x", "x")
+    (dedicated / "notes.txt").write_text("")
+    with pytest.raises(SpecError, match="contains more than worktrees"):
+        MountPlanner(_project(repo)).plan(_spec(worktree_dirs=[str(dedicated)]))
+
+
+def test_protected_files_are_read_only_in_every_checkout(tmp_path, repo):
+    (repo / "bulbi.toml").write_text("")
+    wt = add_worktree(repo, tmp_path / "worktrees" / "app" / "wt", "wt")
+    (wt / "bulbi.toml").write_text("")
+    git_dir = repo / ".git"
+    (git_dir / "worktrees" / "wt" / "config.worktree").write_text("")
+    plan = MountPlanner(_project(wt)).plan(_spec())
+    binds = _binds(plan)
+    for path in (repo / "bulbi.toml", wt / "bulbi.toml", git_dir / "config", git_dir / "hooks",
+                 git_dir / "worktrees" / "wt" / "config.worktree"):  # fmt: skip
+        assert (str(path), str(path), True) in binds, path
+    assert not any(".git-main" in target for _, target, _ in binds)
+
+
+def test_missing_hooks_directory_is_hidden_by_an_empty_tmpfs(repo):
+    hooks = repo / ".git" / "hooks"
+    for hook in hooks.iterdir():
+        hook.unlink()
+    hooks.rmdir()
+    assert TmpfsMount(str(hooks)) in MountPlanner(_project(repo)).plan(_spec())
+
+
+def test_excludes_apply_to_every_worktree(tmp_path, repo):
+    wt = add_worktree(repo, tmp_path / "worktrees" / "app" / "wt", "wt")
+    (wt / ".env").write_text("SECRET=1")
+    plan = MountPlanner(_project(repo)).plan(_spec([MountSpec(path=".", exclude=[".env"])]))
+    assert BindMount("/dev/null", str(wt / ".env"), True) in plan
+
+
+def test_is_worktree_container(tmp_path, repo):
+    trees = tmp_path / "trees"
+    wt = add_worktree(repo, trees / "one", "one")
+    assert is_worktree_container(trees, [repo, wt])
+    (trees / ".DS_Store").write_text("")
+    assert is_worktree_container(trees, [repo, wt])
+    (trees / "other").mkdir()
+    assert not is_worktree_container(trees, [repo, wt])
+    assert not is_worktree_container(tmp_path / "missing", [repo])
+
+
+# ---- EnvironmentBuilder ----------------------------------------------------------------
 
 
 def test_agent_environment_and_api_keys_are_added():
@@ -87,96 +183,165 @@ def test_agent_environment_and_api_keys_are_added():
     assert not any("PROXY" in key.upper() for key in env)  # the gateway needs no proxy env
 
 
-# ---- TerminalExec -----------------------------------------------------------
+# ---- TerminalExec ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("is_tty", "flags"), [(True, ["-it"]), (False, [])])
-def test_terminal_exec_runs_through_entrypoint(is_tty: bool, flags: list[str]):
+def test_terminal_exec_runs_through_entrypoint_in_the_workdir(is_tty: bool, flags: list[str]):
     runner = RecordingRunner(returncode=3)
-    code = TerminalExec(runner=runner, is_terminal=lambda: is_tty).run("cid", ["ls", "-la"])
+    terminal = TerminalExec(runner=runner, is_terminal=lambda: is_tty)
+    code = terminal.run(
+        "cid", ["ls", "-la"], workdir="/repo/wt", environment={"BULBI_EXEC": "session"}
+    )
     assert code == 3
-    assert runner.calls == [["docker", "exec", *flags, "cid", "/entrypoint.sh", "ls", "-la"]]
+    assert runner.calls == [
+        ["docker", "exec", *flags, "-w", "/repo/wt", "-e", "BULBI_EXEC=session", "cid",
+         "/entrypoint.sh", "ls", "-la"]
+    ]  # fmt: skip
 
 
-# ---- BoxManager -------------------------------------------------------------
+# ---- Identity --------------------------------------------------------------------------
 
 
-def test_container_name_is_stable_per_project():
-    name = BoxManager.container_name(_spec(), Path("/projects/a"))
-    assert name == BoxManager.container_name(_spec(), Path("/projects/a"))
-    assert name != BoxManager.container_name(_spec(), Path("/projects/b"))
-    assert name.startswith("bulbi-demo-")
-    assert len(name) == len("bulbi-demo-") + 8
+def test_identity_names_and_labels(tmp_path):
+    identity = BoxIdentity(tmp_path / ".git", "demo", "read only")
+    assert identity.name.startswith("bulbi-demo-")
+    assert identity.name.endswith("-read_only")
+    assert identity.gateway_name == identity.name + "-gw"
+    assert identity.network_name == identity.name + "-net"
+    labels = identity.labels("abc", gateway=True)
+    assert labels["bulbi.project"] == str(tmp_path / ".git")
+    assert labels["bulbi.profile"] == "read only"
+    assert labels["bulbi.spec_hash"] == "abc"
+    assert labels["bulbi.role"] == "gateway"
 
 
-def test_start_runs_idle_labelled_container_with_limits():
+def test_profiles_map_to_distinct_boxes(tmp_path):
+    names = {BoxIdentity(tmp_path, "demo", profile).name for profile in (None, "a", "b")}
+    assert len(names) == 3
+
+
+# ---- BoxManager ------------------------------------------------------------------------
+
+
+def _launch(tmp_path: Path, spec: BulbiSpec | None = None) -> BoxLaunch:
+    return BoxLaunch(
+        identity=BoxIdentity(tmp_path, "demo"),
+        spec=spec or _spec(limits=LimitsSpec(cpu=3, memory="512MB")),
+        image_tag="img:1",
+        spec_hash="h1",
+        mounts=[BindMount("/src", "/src", False), TmpfsMount("/src/secrets")],
+        environment={"A": "1"},
+        gateway_id="gw-id",
+        project_root=tmp_path,
+        worktrees=[tmp_path],
+    )
+
+
+def test_create_runs_a_hardened_box_in_the_gateway_namespace(tmp_path):
     client = FakeDocker()
-    mounts = [BindMount("/src", WORKSPACE, read_only=False)]
-    spec = _spec(limits=LimitsSpec(cpu=3, memory="512MB"))
-
-    box = BoxManager(client).start(spec, Path("/p"), "img:1", mounts, {"A": "1"})
-
+    box = BoxManager(client).create(_launch(tmp_path))
     ((image, kwargs),) = client.containers.run_calls
     assert image == "img:1"
     assert box.id == f"id-{kwargs['name']}"
-    assert kwargs["command"] == ["sleep", "infinity"]
-    assert kwargs["labels"] == {"bulbi": "true", "bulbi.box": "demo"}
+    assert kwargs["command"] == ["/usr/local/bin/bulbi-idle-watcher", "600"]
+    assert kwargs["network_mode"] == "container:gw-id"
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert kwargs["security_opt"] == ["no-new-privileges"]
+    assert kwargs["pids_limit"] == 512
+    assert kwargs["labels"]["bulbi.spec_hash"] == "h1"
+    assert kwargs["labels"]["bulbi.worktrees"] == f'["{tmp_path}"]'
+    assert kwargs["environment"] == {"A": "1", "BULBI_PROJECT_DIR": str(tmp_path)}
     assert kwargs["nano_cpus"] == 3 * 10**9
     assert kwargs["mem_limit"] == 512 * 1024**2
-    assert kwargs["environment"] == {"A": "1"}
-    assert kwargs["mounts"][0]["Target"] == WORKSPACE
-    assert kwargs["mounts"][0]["ReadOnly"] is False
+    assert kwargs["mounts"][1]["Type"] == "tmpfs"
+    assert kwargs["mounts"][1]["ReadOnly"] is True
 
 
-def test_start_replaces_stale_container():
+def test_stop_keeps_the_box_and_start_reuses_it(tmp_path):
     client = FakeDocker()
-    name = BoxManager.container_name(_spec(), Path("/p"))
-    stale = client.containers.add(FakeContainer(name))
-    BoxManager(client).start(_spec(), Path("/p"), "img", [], {})
-    assert stale.removed
-
-
-def test_started_box_executes_as_sandbox_user():
-    client = FakeDocker()
-    box = BoxManager(client).start(_spec(), Path("/p"), "img", [], {})
-    box.handle.exec(["true"])
-    container = client.containers.get(box.id)
-    assert container.exec_calls == [(["true"], "bulbi")]
-
-
-def test_stop_stops_and_removes_and_ignores_missing():
-    client = FakeDocker()
-    container = client.containers.add(FakeContainer("c"))
     manager = BoxManager(client)
-    manager.stop(container.id)
-    assert container.stopped and container.removed
+    box = manager.create(_launch(tmp_path))
+    manager.stop(box.id)
+    container = client.containers.get(box.id)
+    assert container.stopped and not container.removed
+    assert manager.start(box.id).id == box.id
     manager.stop("does-not-exist")
 
 
-def test_list_boxes():
+def test_find_reports_state_and_labels(tmp_path):
+    client = FakeDocker()
+    manager = BoxManager(client)
+    box = manager.create(_launch(tmp_path))
+    state = manager.find(BoxIdentity(tmp_path, "demo").name)
+    assert state is not None and state.id == box.id and state.running
+    assert state.spec_hash == "h1"
+    assert state.worktrees_at_start == [str(tmp_path)]
+    assert manager.find("nope") is None
+
+
+def test_list_boxes_hides_gateways():
     client = FakeDocker()
     client.containers.add(FakeContainer("bulbi-demo-1", labels={"bulbi.box": "demo"}))
-    assert BoxManager(client).list_boxes() == [
-        BoxInfo(id="id-bul", name="bulbi-demo-1", box="demo", status="running")
-    ]
+    client.containers.add(FakeContainer("bulbi-demo-1-gw", labels={"bulbi.role": "gateway"}))
+    assert [s.name for s in BoxManager(client).list_boxes()] == ["bulbi-demo-1"]
+    assert len(BoxManager(client).list_containers()) == 2
+
+
+def test_remove_box_also_removes_its_gateway_and_network():
+    client = FakeDocker()
+    box = client.containers.add(FakeContainer("bulbi-demo-1", labels={"bulbi.project": "/p"}))
+    gateway = client.containers.add(
+        FakeContainer("bulbi-demo-1-gw", labels={"bulbi.role": "gateway"})
+    )
+    network = client.networks.create("bulbi-demo-1-net", "bridge", {}, True)
+    BoxManager(client).remove_box("bulbi-demo-1")
+    assert box.removed and gateway.removed and network.removed
 
 
 def test_remove_missing_container_raises_sandbox_error():
     with pytest.raises(SandboxError, match="failed to remove container nope"):
-        BoxManager(FakeDocker()).remove("nope")
+        BoxManager(FakeDocker()).remove_box("nope")
 
 
-def test_reset_removes_containers_and_images():
+def test_reset_removes_boxes_before_gateways_then_networks_and_images():
     client = FakeDocker(images={"bulbi/demo:1"})
-    container = client.containers.add(FakeContainer("c"))
+    removed: list[str] = []
+    for name, labels in (("gw", {"bulbi.role": "gateway"}), ("box", {})):
+        container = client.containers.add(FakeContainer(name, labels=labels))
+        container.remove = lambda force=False, n=name: removed.append(n)  # type: ignore[method-assign]
+    network = client.networks.create("bulbi-x-net", "bridge", {}, True)
     BoxManager(client).reset()
-    assert container.removed
+    assert removed == ["box", "gw"]
+    assert network.removed
     assert client.images.removed == ["bulbi/demo:1"]
 
 
-def test_invalid_memory_limit_fails_before_docker_is_called():
-    from bulbi.errors import SpecError
-
+def test_invalid_memory_limit_fails_before_docker_is_called(tmp_path):
     client = FakeDocker()
     with pytest.raises(SpecError, match="invalid memory string"):
-        BoxManager(client).start(_spec(limits=LimitsSpec(memory="lots")), Path("/p"), "i", [], {})
+        BoxManager(client).create(_launch(tmp_path, _spec(limits=LimitsSpec(memory="lots"))))
+    assert client.containers.run_calls == []
+
+
+# ---- Session tracking ------------------------------------------------------------------
+
+
+def test_session_count_ignores_setup_execs_and_finished_sessions():
+    client = FakeDocker()
+    box = client.containers.add(FakeContainer("box"))
+    box.attrs["ExecIDs"] = ["s1", "s2", "setup", "done"]
+    client.api.execs = {
+        "s1": {"Running": True, "ProcessConfig": {"entrypoint": "/entrypoint.sh"}},
+        "s2": {"Running": True, "ProcessConfig": {"entrypoint": "/entrypoint.sh"}},
+        "setup": {"Running": True, "ProcessConfig": {"entrypoint": "claude"}},
+        "done": {"Running": False, "ProcessConfig": {"entrypoint": "/entrypoint.sh"}},
+    }
+    assert DockerSessionTracker(client).active_sessions(box.id) == 2
+    assert DockerSessionTracker(client).active_sessions("missing") == 0
+
+
+def test_container_state_of_unknown_labels():
+    state = ContainerState("id", "n", "exited", {"bulbi.worktrees": "not json"})
+    assert not state.running
+    assert state.worktrees_at_start == []

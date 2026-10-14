@@ -64,6 +64,7 @@ class FakeContainer:
         }
         self.archives: list[tuple[str, bytes]] = []
         self.stopped = False
+        self.started_again = False
         self.removed = False
         self.attrs: dict = {"NetworkSettings": {"Networks": {}}}
         self.log_output = b""
@@ -84,6 +85,11 @@ class FakeContainer:
 
     def stop(self, timeout: int) -> None:
         self.stopped = True
+        self.status = "exited"
+
+    def start(self) -> None:
+        self.started_again = True
+        self.status = "running"
 
     def remove(self, force: bool = False) -> None:
         self.removed = True
@@ -101,6 +107,9 @@ class FakeContainers:
     def run(self, image: str, **kwargs) -> FakeContainer:
         self.run_calls.append((image, kwargs))
         container = FakeContainer(kwargs["name"], kwargs.get("labels"))
+        container.attrs["Mounts"] = [
+            {"Destination": m["Target"]} for m in kwargs.get("mounts", [])
+        ]
         if "network" in kwargs:
             container.attrs["NetworkSettings"]["Networks"][kwargs["network"]] = {
                 "IPAddress": FakeNetworks.GATEWAY_CONTAINER_ADDRESS
@@ -186,11 +195,24 @@ class FakeNetworks:
         return [n for n in live if names is None or n.name in names]
 
 
+class FakeApi:
+    """The low-level client: exec inspection for session counting."""
+
+    def __init__(self) -> None:
+        self.execs: dict[str, dict] = {}
+
+    def exec_inspect(self, exec_id: str) -> dict:
+        if exec_id not in self.execs:
+            raise docker.errors.NotFound(f"No such exec instance: {exec_id}")
+        return self.execs[exec_id]
+
+
 class FakeDocker:
     def __init__(self, images: set[str] | None = None) -> None:
         self.images = FakeImages(images)
         self.containers = FakeContainers()
         self.networks = FakeNetworks()
+        self.api = FakeApi()
 
     @property
     def box_builds(self) -> list[dict]:
