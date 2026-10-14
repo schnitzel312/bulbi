@@ -36,13 +36,11 @@ class SpecParser:
             mounts=[self._parse_mount(entry) for entry in raw.get("mount", [])],
             network=self._parse_network(raw.get("network", {})),
             secrets={
-                name: self._parse_secret(entry)
-                for name, entry in raw.get("secrets", {}).items()
+                name: self._parse_secret(entry) for name, entry in raw.get("secrets", {}).items()
             },
             limits=self._parse_limits(raw.get("limits", {})),
             profiles={
-                name: self._parse_profile(entry)
-                for name, entry in raw.get("profiles", {}).items()
+                name: self._parse_profile(entry) for name, entry in raw.get("profiles", {}).items()
             },
         )
 

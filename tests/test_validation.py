@@ -76,18 +76,14 @@ def test_interpreter_warning():
 
 
 def test_profile_widens_tools():
-    spec = _make_spec(
-        profiles={"bad": ProfileSpec(tools=ToolsSpec(allow=["curl"]))}
-    )
+    spec = _make_spec(profiles={"bad": ProfileSpec(tools=ToolsSpec(allow=["curl"]))})
     result = validate_spec(spec)
     assert not result.ok
     assert "not in root" in result.errors[0]
 
 
 def test_secret_no_hosts_warning():
-    spec = _make_spec(
-        secrets={"KEY": SecretSpec(from_source="env", hosts=[])}
-    )
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=[])})
     result = validate_spec(spec)
     assert any("no host restriction" in w for w in result.warnings)
 

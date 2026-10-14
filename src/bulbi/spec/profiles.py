@@ -66,9 +66,7 @@ class ProfileMerger:
                 yield f"widens mount '{path}' from read-only to read-write"
 
     @staticmethod
-    def _merged_mounts(
-        root_mounts: list[MountSpec], overrides: dict[str, str]
-    ) -> list[MountSpec]:
+    def _merged_mounts(root_mounts: list[MountSpec], overrides: dict[str, str]) -> list[MountSpec]:
         return [
             replace(mount, mode=MountMode(overrides[mount.path]))
             if mount.path in overrides

@@ -145,19 +145,22 @@ def test_missing_spec_file(tmp_path: Path):
 
 
 def test_missing_box_name(tmp_path: Path):
-    (tmp_path / "bulbi.toml").write_text(dedent("""\
+    (tmp_path / "bulbi.toml").write_text(
+        dedent("""\
         spec = "0.1"
         [box]
         agent = "claude"
         [tools]
         allow = ["git"]
-    """))
+    """)
+    )
     with pytest.raises(SpecError, match="box.name is required"):
         SpecLoader().load(tmp_path)
 
 
 def test_invalid_mount_mode(tmp_path: Path):
-    (tmp_path / "bulbi.toml").write_text(dedent("""\
+    (tmp_path / "bulbi.toml").write_text(
+        dedent("""\
         spec = "0.1"
         [box]
         name = "test"
@@ -166,7 +169,8 @@ def test_invalid_mount_mode(tmp_path: Path):
         [[mount]]
         path = "."
         mode = "execute"
-    """))
+    """)
+    )
     with pytest.raises(SpecError, match="mount mode"):
         SpecLoader().load(tmp_path)
 

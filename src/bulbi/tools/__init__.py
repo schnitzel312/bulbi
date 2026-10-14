@@ -1,5 +1,7 @@
 """Tools that can be installed into a box."""
 
+from __future__ import annotations
+
 from bulbi.tools.catalog import BASE_PACKAGES, BUILTIN_TOOLS
 from bulbi.tools.installers import APT_INSTALLER, AptInstaller, ToolInstaller
 from bulbi.tools.models import ResolvedTool, ToolDefinition, ToolReference

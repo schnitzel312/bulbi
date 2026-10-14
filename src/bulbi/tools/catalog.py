@@ -56,9 +56,7 @@ BUILTIN_TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(name="jq", packages=("jq",), verify_cmd="jq --version"),
     ToolDefinition(name="curl", packages=("curl",), verify_cmd="curl --version"),
     ToolDefinition(name="make", packages=("make",), verify_cmd="make --version"),
-    ToolDefinition(
-        name="gcc", packages=("gcc", "g++", "libc6-dev"), verify_cmd="gcc --version"
-    ),
+    ToolDefinition(name="gcc", packages=("gcc", "g++", "libc6-dev"), verify_cmd="gcc --version"),
     ToolDefinition(
         name="go", packages=("golang",), verify_cmd="go version", default_version="1.22"
     ),

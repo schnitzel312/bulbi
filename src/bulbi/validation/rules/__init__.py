@@ -1,5 +1,7 @@
 """Concrete validation rules, one concern per module."""
 
+from __future__ import annotations
+
 from bulbi.validation.rules.mounts import MountsPresentRule, WritableMountRule
 from bulbi.validation.rules.network import EmptyAllowlistRule, OpenNetworkRule
 from bulbi.validation.rules.profiles import ProfilesNarrowRule

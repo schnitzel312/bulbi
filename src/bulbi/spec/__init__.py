@@ -1,5 +1,7 @@
 """The ``bulbi.toml`` spec: data models, parsing, loading, and profiles."""
 
+from __future__ import annotations
+
 from bulbi.spec.loader import BulbiTomlSource, PyprojectSource, SpecLoader, SpecSource
 from bulbi.spec.models import (
     BoxSpec,

@@ -31,7 +31,7 @@ class ValidationIssue:
         return cls(Severity.WARNING, message)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ValidationResult:
     """Errors (the spec cannot work) and warnings (it works, but is risky)."""
 
@@ -40,11 +40,11 @@ class ValidationResult:
 
     @classmethod
     def from_issues(cls, issues: Iterable[ValidationIssue]) -> ValidationResult:
-        result = cls()
-        for issue in issues:
-            target = result.errors if issue.severity is Severity.ERROR else result.warnings
-            target.append(issue.message)
-        return result
+        collected = list(issues)
+        return cls(
+            errors=[i.message for i in collected if i.severity is Severity.ERROR],
+            warnings=[i.message for i in collected if i.severity is Severity.WARNING],
+        )
 
     @property
     def ok(self) -> bool:
