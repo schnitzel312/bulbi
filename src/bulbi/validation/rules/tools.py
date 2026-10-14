@@ -30,9 +30,6 @@ class KnownToolsRule(ValidationRule):
 class InterpreterToolsRule(ValidationRule):
     """Warn that general-purpose interpreters make network and mounts the real boundary."""
 
-    def __init__(self, tools: ToolRegistry) -> None:
-        self._tools = tools
-
     def check(self, spec: BulbiSpec) -> Iterator[ValidationIssue]:
         interpreters = sorted(INTERPRETER_TOOLS & self._allowed_names(spec))
         if interpreters:
@@ -42,11 +39,12 @@ class InterpreterToolsRule(ValidationRule):
                 "The network and mount rules are the real security boundary"
             )
 
-    def _allowed_names(self, spec: BulbiSpec) -> set[str]:
+    @staticmethod
+    def _allowed_names(spec: BulbiSpec) -> set[str]:
         names = set()
         for reference in spec.tools.allow:
             try:
-                names.add(self._tools.parse(reference).name)
+                names.add(ToolRegistry.parse(reference).name)
             except ToolError:
                 continue  # Reported by KnownToolsRule.
         return names

@@ -41,7 +41,7 @@ class SpecValidator:
                 SecretSourceRule(),
                 SecretHostsRule(),
                 ResourceLimitsRule(),
-                InterpreterToolsRule(tools),
+                InterpreterToolsRule(),
             ]
         )
 

@@ -9,6 +9,7 @@ import click
 from bulbi.cli.commands.base import BulbiCommand, ClickDecorator
 from bulbi.cli.context import AppContext
 from bulbi.cli.render.audit_log import AuditLogRenderer
+from bulbi.errors import AuditLogError
 from bulbi.proxy import AuditLogReader, audit_log_path
 
 
@@ -22,5 +23,5 @@ class LogCommand(BulbiCommand):
     def execute(self, app: AppContext, denied: bool) -> None:
         reader = AuditLogReader(audit_log_path(app.project_root))
         if not reader.exists():
-            raise click.ClickException(f"No log file found at {reader.path}. Run a command first.")
+            raise AuditLogError(f"No log file found at {reader.path}. Run a command first.")
         AuditLogRenderer(app.console).render(reader.entries(), denied_only=denied)

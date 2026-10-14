@@ -71,10 +71,6 @@ class AuditLogWriter:
         self._clock = clock
         self._lock = threading.Lock()
 
-    @property
-    def path(self) -> Path:
-        return self._path
-
     def record(self, domain: str, action: AuditAction, method: str, url: str) -> None:
         entry = LogEntry(
             timestamp=self._clock().isoformat(),
@@ -115,9 +111,6 @@ class AuditLogReader:
             if line.strip():
                 entries.append(self._parse_line(line, line_number))
         return entries
-
-    def denied(self) -> list[LogEntry]:
-        return [entry for entry in self.entries() if entry.denied]
 
     def _parse_line(self, line: str, line_number: int) -> LogEntry:
         try:

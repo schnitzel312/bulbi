@@ -23,9 +23,6 @@ class AgentRegistry:
     def names(self) -> list[str]:
         return sorted(self._agents)
 
-    def __contains__(self, name: object) -> bool:
-        return name in self._agents
-
     def resolve(self, name: str) -> Agent:
         """The registered agent called ``name``, or an :class:`UnmanagedAgent` for it."""
         return self._agents.get(name) or UnmanagedAgent(name)

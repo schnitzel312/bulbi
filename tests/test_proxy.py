@@ -58,7 +58,7 @@ def test_proxy_denies_unlisted_domain(proxy: ProxyServer, log_path: Path):
     assert exc_info.value.code == 403
 
     # Check the log
-    denied = AuditLogReader(log_path).denied()
+    denied = [entry for entry in AuditLogReader(log_path).entries() if entry.denied]
     assert len(denied) >= 1
     assert denied[0].domain == "evil.example.com"
     assert denied[0].action == "deny"
@@ -224,7 +224,7 @@ def test_audit_log_round_trip_with_injected_clock(log_path: Path):
     }
     reader = AuditLogReader(log_path)
     assert [e.domain for e in reader.entries()] == ["a.com", "b.com"]
-    assert [e.domain for e in reader.denied()] == ["b.com"]
+    assert [e.domain for e in reader.entries() if e.denied] == ["b.com"]
 
 
 def test_audit_reader_missing_log_is_empty(tmp_path: Path):

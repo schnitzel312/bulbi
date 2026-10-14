@@ -10,6 +10,7 @@ from bulbi.cli.commands.base import BulbiCommand, ClickDecorator
 from bulbi.cli.context import AppContext
 from bulbi.constants import DEFAULT_AGENT, SPEC_FILENAME
 from bulbi.detection import StarterSpecRenderer
+from bulbi.errors import SpecError
 
 
 class InitCommand(BulbiCommand):
@@ -22,9 +23,7 @@ class InitCommand(BulbiCommand):
     def execute(self, app: AppContext, force: bool) -> None:
         spec_path = app.project_root / SPEC_FILENAME
         if spec_path.exists() and not force:
-            raise click.ClickException(
-                f"{SPEC_FILENAME} already exists. Use --force to overwrite."
-            )
+            raise SpecError(f"{SPEC_FILENAME} already exists. Use --force to overwrite.")
         project = app.detectors.detect(app.project_root)
         renderer = StarterSpecRenderer(app.agents.resolve(DEFAULT_AGENT))
         spec_path.write_text(renderer.render(project))

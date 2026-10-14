@@ -33,7 +33,6 @@ def test_registry_resolves_builtin_agents():
     assert isinstance(registry.resolve("claude"), ClaudeAgent)
     assert isinstance(registry.resolve("codex"), CodexAgent)
     assert registry.names == ["claude", "codex"]
-    assert "claude" in registry
 
 
 def test_registry_falls_back_to_unmanaged_agent():
@@ -41,7 +40,7 @@ def test_registry_falls_back_to_unmanaged_agent():
     assert isinstance(agent, UnmanagedAgent)
     assert agent.launch_command == ("aider",)
     assert agent.install_commands == ()
-    assert "aider" not in AgentRegistry.builtin()
+    assert "aider" not in AgentRegistry.builtin().names
 
 
 def test_custom_registry():
