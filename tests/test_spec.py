@@ -298,3 +298,19 @@ def test_memory_bytes_rejects_unknown_units():
 
     with pytest.raises(SpecError, match="invalid memory string"):
         LimitsSpec(memory="4 gigs").memory_bytes()
+
+
+def test_profile_cannot_widen_network_default_to_allow(sample_toml: Path):
+    from bulbi.spec import NetworkSpec, ProfileSpec
+
+    spec = SpecLoader().load(sample_toml)
+    with pytest.raises(SpecError, match="widens network default from 'deny' to 'allow'"):
+        ProfileMerger().merge(spec, ProfileSpec(network=NetworkSpec(default="allow")))
+
+
+def test_profile_may_keep_or_narrow_network_default(sample_toml: Path):
+    from bulbi.spec import NetworkSpec, ProfileSpec
+
+    spec = SpecLoader().load(sample_toml)
+    merged = ProfileMerger().merge(spec, ProfileSpec(network=NetworkSpec(default="deny")))
+    assert merged.network.default == "deny"

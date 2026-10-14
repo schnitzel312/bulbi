@@ -148,3 +148,10 @@ def test_invalid_resource_limits_are_errors():
         "limits.cpu must be a positive integer, got 0",
         "limits.memory: invalid memory string: 'lots'",
     ]
+
+
+def test_profile_widening_network_default_is_an_error():
+    spec = _make_spec(profiles={"open": ProfileSpec(network=NetworkSpec(default="allow"))})
+    assert validate_spec(spec).errors == [
+        "profile 'open' widens network default from 'deny' to 'allow'"
+    ]

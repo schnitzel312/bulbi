@@ -6,7 +6,14 @@ from collections.abc import Iterable, Iterator
 from dataclasses import replace
 
 from bulbi.errors import SpecError
-from bulbi.spec.models import BulbiSpec, MountMode, MountSpec, ProfileSpec
+from bulbi.spec.models import (
+    BulbiSpec,
+    MountMode,
+    MountSpec,
+    NetworkDefault,
+    NetworkSpec,
+    ProfileSpec,
+)
 
 
 class ProfileMerger:
@@ -39,9 +46,17 @@ class ProfileMerger:
         if profile.tools is not None:
             yield from self._extra_entries("tools", profile.tools.allow, root.tools.allow)
         if profile.network is not None:
+            yield from self._network_default_violations(root.network, profile.network)
             yield from self._extra_entries("network", profile.network.allow, root.network.allow)
         if profile.mounts is not None:
             yield from self._mount_violations(root.mounts, profile.mounts)
+
+    @staticmethod
+    def _network_default_violations(root: NetworkSpec, narrowed: NetworkSpec) -> Iterator[str]:
+        if root.default is NetworkDefault.DENY and narrowed.default is NetworkDefault.ALLOW:
+            yield (
+                f"widens network default from '{NetworkDefault.DENY}' to '{NetworkDefault.ALLOW}'"
+            )
 
     @staticmethod
     def _extra_entries(

@@ -292,3 +292,11 @@ def test_image_tag_matches_spec_hash(cli: Harness):
     cli.invoke("run")
     expected = ImageBuilder.tag_for(SpecLoader().load(cli.project_root))
     assert cli.docker.images.builds[0]["tag"] == expected
+
+
+def test_run_with_profile_widening_network_default_fails_before_docker(cli: Harness):
+    cli.write_spec(SPEC + '\n[profiles.open]\nnetwork.default = "allow"\n')
+    result = cli.invoke("run", "-p", "open")
+    assert result.exit_code == 1
+    assert "profile widens network default from 'deny' to 'allow'" in result.output
+    assert cli.docker.containers.run_calls == []
