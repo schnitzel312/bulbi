@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Public home of the project, linked from generated specs.
+PROJECT_URL = "https://github.com/schnitzel312/bulbi"
+
 # platform.system() on macOS (Docker Desktop host).
 MACOS_SYSTEM_NAME = "Darwin"
 

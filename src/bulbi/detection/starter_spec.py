@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 
 from bulbi.agents import Agent
-from bulbi.constants import DEFAULT_CPU, DEFAULT_MEMORY, SPEC_VERSION
+from bulbi.constants import DEFAULT_CPU, DEFAULT_MEMORY, PROJECT_URL, SPEC_VERSION
 from bulbi.detection.base import DetectedProject
 from bulbi.spec import MountMode, NetworkDefault
 
@@ -28,7 +28,7 @@ class StarterSpecRenderer:
         )
         lines = [
             "# Bulbi spec — defines the sandbox environment for coding agents.",
-            "# Docs: https://github.com/anthropics/bulbi",
+            f"# Docs: {PROJECT_URL}",
             "",
             "# Spec format version (do not change).",
             f"spec = {_toml_string(SPEC_VERSION)}",

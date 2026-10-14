@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 from bulbi.agents import ClaudeAgent, CodexAgent
+from bulbi.constants import PROJECT_URL
 from bulbi.detection import (
     DetectedProject,
     DetectorRegistry,
@@ -151,3 +152,9 @@ def test_setup_comment_says_first_container_start(tmp_path: Path):
     spec = generate_starter_spec(tmp_path)
     assert "first container start" in spec
     assert "when the image is built" not in spec
+
+
+def test_starter_spec_links_the_project_repository(tmp_path: Path):
+    spec = generate_starter_spec(tmp_path)
+    assert f"# Docs: {PROJECT_URL}" in spec
+    assert PROJECT_URL == "https://github.com/schnitzel312/bulbi"
