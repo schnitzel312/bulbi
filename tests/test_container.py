@@ -329,3 +329,24 @@ def test_container_state_of_unknown_labels():
     state = ContainerState("id", "n", "exited", {"bulbi.worktrees": "not json"})
     assert not state.running
     assert state.worktrees_at_start == []
+
+
+def test_remove_network_retries_while_an_endpoint_is_still_detaching():
+    import docker.errors
+
+    from bulbi.container.gateway import GatewayManager
+
+    client = FakeDocker()
+    network = client.networks.create("bulbi-x-net", "bridge", {}, True)
+    attempts = []
+    real_remove = network.remove
+
+    def flaky_remove():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise docker.errors.APIError("network has active endpoints")
+        real_remove()
+
+    network.remove = flaky_remove  # type: ignore[method-assign]
+    GatewayManager(client, clock=lambda: 0.0, sleep=lambda _: None).remove_network(network.id)
+    assert network.removed and len(attempts) == 3

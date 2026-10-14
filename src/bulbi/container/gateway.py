@@ -22,6 +22,8 @@ _GATEWAY_CAPABILITIES = ["NET_ADMIN", "SETUID", "SETGID"]
 _GATEWAY_PIDS_LIMIT = 64
 _GATEWAY_MEMORY = "128m"
 _LOG_TAIL_LINES = 20
+_NETWORK_REMOVE_ATTEMPTS = 5
+_NETWORK_REMOVE_RETRY_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -86,11 +88,19 @@ class GatewayManager:
         return SandboxNetwork(network.id, network.name, configs[0].get("Gateway"))
 
     def remove_network(self, network_id: str) -> None:
+        """Remove the network, retrying while a just-removed gateway's endpoint detaches."""
+        errors = docker_sdk().errors
         with docker_errors(f"failed to remove network {network_id}"):
-            try:
-                self._docker.networks.get(network_id).remove()
-            except docker_sdk().errors.NotFound:
-                return
+            for attempt in range(_NETWORK_REMOVE_ATTEMPTS):
+                try:
+                    self._docker.networks.get(network_id).remove()
+                    return
+                except errors.NotFound:
+                    return
+                except errors.APIError:
+                    if attempt == _NETWORK_REMOVE_ATTEMPTS - 1:
+                        raise
+                    self._sleep(_NETWORK_REMOVE_RETRY_SECONDS)
 
     def _remove_stale_network(self, name: str) -> None:
         for network in self._docker.networks.list(names=[name]):
