@@ -35,9 +35,7 @@ DEFAULT_MEMORY = "4GB"
 SPEC_VERSION = "0.1"
 SPEC_FILENAME = "bulbi.toml"
 
-# Host interface the network proxy listens on (see TODO(bulbi) in container/environment.py).
-PROXY_BIND_HOST = "127.0.0.1"
-
 # Proxy log directory (relative to project root).
 LOG_DIR = ".bulbi"
+# The name predates the gateway; kept so existing tooling keeps finding the audit log.
 LOG_FILENAME = "proxy.log"

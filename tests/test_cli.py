@@ -553,3 +553,18 @@ def test_warnings_are_shown_but_do_not_block(cli: Harness):
     assert "Warnings:" in result.output and "interpreters allowed (python)" in result.output
     assert "Spec is valid" not in result.output
     assert cli.runner.calls
+
+
+def test_log_shows_gateway_reasons_and_rules_next_to_legacy_lines(cli: Harness):
+    gateway_entry = {
+        "timestamp": "t3", "domain": "gist.github.com", "action": "deny", "method": "DNS",
+        "url": "gist.github.com", "reason": "denied_by_rule", "rule": "gist.github.com",
+        "ip": None, "port": None, "proto": "udp",
+    }  # fmt: skip
+    _write_log(cli.project_root, ALLOWED, gateway_entry)
+    result = cli.invoke("log", "--denied")
+    assert result.exit_code == 0
+    assert "Network Log" in result.output
+    assert "denied_by_rule" in result.output and "DNS" in result.output
+    assert "ok.com" not in result.output
+    assert "2 total entries, 1 denied" in result.output

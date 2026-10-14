@@ -29,7 +29,7 @@ class MountMode(StrEnum):
 
 
 class NetworkDefault(StrEnum):
-    """What the proxy does with domains that are not explicitly allowed."""
+    """What the gateway does with destinations no rule mentions."""
 
     DENY = "deny"
     ALLOW = "allow"

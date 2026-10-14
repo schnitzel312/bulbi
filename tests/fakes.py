@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Sequence
-from pathlib import Path
 
 import docker.errors
 
 from bulbi.agents import ContainerHandle, CredentialProvider, ExecResult
-from bulbi.proxy import NetworkProxy
-from bulbi.spec import NetworkSpec
 
 
 class FakeContainerHandle(ContainerHandle):
@@ -230,31 +227,3 @@ class RecordingRunner:
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(argv)
         return subprocess.CompletedProcess(argv, self.returncode)
-
-
-class FakeProxy(NetworkProxy):
-    """Records its lifecycle instead of listening on a socket."""
-
-    PORT = 3128
-
-    def __init__(self, network: NetworkSpec, project_root: Path) -> None:
-        self.network = network
-        self.project_root = project_root
-        self.started = False
-        self.stopped = False
-
-    def start(self, port: int = 0) -> int:
-        self.started = True
-        return self.PORT
-
-    def stop(self) -> None:
-        self.stopped = True
-
-
-class FakeProxyFactory:
-    def __init__(self) -> None:
-        self.created: list[FakeProxy] = []
-
-    def __call__(self, network: NetworkSpec, project_root: Path) -> FakeProxy:
-        self.created.append(FakeProxy(network, project_root))
-        return self.created[-1]

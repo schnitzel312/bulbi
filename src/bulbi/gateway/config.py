@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from bulbi.constants import LOG_FILENAME
+
 CONFIG_ENV = "BULBI_GATEWAY_CONFIG"
 RESOLVER_UID = 999
 LOG_MOUNT = "/var/log/bulbi"
@@ -30,7 +32,7 @@ class GatewayConfig:
     host_access: HostAccess = HostAccess.DOCKER_DESKTOP
     host_address: str | None = None
     resolver_uid: int = RESOLVER_UID
-    log_file: str = f"{LOG_MOUNT}/proxy.log"
+    log_file: str = f"{LOG_MOUNT}/{LOG_FILENAME}"
     log_owner: tuple[int, int] | None = None
 
     def to_json(self) -> str:

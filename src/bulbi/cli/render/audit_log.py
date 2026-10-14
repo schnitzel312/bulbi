@@ -1,4 +1,4 @@
-"""Rendering the proxy audit log for ``bulbi log``."""
+"""Rendering the network audit log for ``bulbi log``."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from bulbi.cli.render.styles import ALLOWED_STYLE, DENIED_STYLE, styled
-from bulbi.proxy import LogEntry
+from bulbi.gateway.audit import LogEntry
 
 
 class AuditLogRenderer:
@@ -23,15 +23,23 @@ class AuditLogRenderer:
 
     @staticmethod
     def _table(entries: list[LogEntry]) -> Table:
-        table = Table(title="Proxy Log")
+        table = Table(title="Network Log")
         table.add_column("Time", style="dim")
         table.add_column("Domain")
         table.add_column("Action")
         table.add_column("Method", style="bold")
-        table.add_column("URL")
+        table.add_column("Target")
+        table.add_column("Reason", style="dim")
+        table.add_column("Rule")
         for entry in entries:
             style = DENIED_STYLE if entry.denied else ALLOWED_STYLE
             table.add_row(
-                entry.timestamp, entry.domain, styled(entry.action, style), entry.method, entry.url
+                entry.timestamp,
+                entry.domain,
+                styled(entry.action, style),
+                entry.method,
+                entry.url,
+                entry.reason or "",
+                entry.rule or "",
             )
         return table

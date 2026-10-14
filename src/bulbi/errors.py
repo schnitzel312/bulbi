@@ -24,7 +24,7 @@ class ToolError(BulbiError):
 
 
 class AuditLogError(BulbiError):
-    """The proxy audit log cannot be read."""
+    """The network audit log cannot be read."""
 
 
 class SandboxError(BulbiError):
