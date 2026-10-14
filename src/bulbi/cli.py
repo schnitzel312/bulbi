@@ -157,30 +157,25 @@ def _run_in_sandbox(
     status_msg: str = "Running",
 ) -> int:
     """Build image, start proxy + container, run a command, then clean up."""
-    from bulbi.container.manager import run_in_box, start_box, stop_box
-    from bulbi.image import build_image
-    from bulbi.proxy import AuditLogWriter, DomainPolicy, ProxyServer, audit_log_path
+    import docker
 
-    console.print(f"[bold]Building image for [cyan]{spec.box.name}[/cyan]...[/bold]")
-    build_image(spec, project_root)
+    from bulbi.agents import AgentRegistry
+    from bulbi.container.manager import BoxManager
+    from bulbi.container.terminal import TerminalExec
+    from bulbi.image import DockerfileBuilder, ImageBuilder
+    from bulbi.sandbox import SandboxServices, SandboxSession
+    from bulbi.tools import ToolRegistry
 
-    proxy = ProxyServer(
-        DomainPolicy.for_network(spec.network), AuditLogWriter(audit_log_path(project_root))
+    client = docker.from_env()
+    services = SandboxServices(
+        images=ImageBuilder(client, DockerfileBuilder(ToolRegistry.builtin())),
+        boxes=BoxManager(client),
+        terminal=TerminalExec(),
     )
-    container_id: str | None = None
-
-    try:
-        proxy_port = proxy.start()
-        console.print("[bold]Starting container...[/bold]")
-        container_id = start_box(spec, project_root, profile=None, proxy_port=proxy_port)
-        console.print(f"[bold]{status_msg}:[/bold] {' '.join(cmd)}")
-        exit_code = run_in_box(container_id, cmd)
-    finally:
-        if container_id:
-            stop_box(container_id)
-        proxy.stop()
-
-    return exit_code
+    agent = AgentRegistry.builtin().resolve(spec.box.agent)
+    console.print(f"[bold]Building image for [cyan]{spec.box.name}[/cyan]...[/bold]")
+    with SandboxSession(spec, project_root, agent, services) as session:
+        return session.run(cmd, status_msg)
 
 
 def _load_and_resolve(profile: str | None) -> tuple[BulbiSpec, Path]:
@@ -288,9 +283,11 @@ def log_cmd(denied: bool) -> None:
 @main.command("ls")
 def ls_cmd() -> None:
     """List all running bulbi containers."""
-    from bulbi.container.manager import list_boxes
+    import docker
 
-    boxes = list_boxes()
+    from bulbi.container.manager import BoxManager
+
+    boxes = [vars(b) for b in BoxManager(docker.from_env()).list_boxes()]
 
     if not boxes:
         console.print("[dim]No running bulbi containers.[/dim]")
@@ -322,10 +319,12 @@ def ls_cmd() -> None:
 @click.argument("container")
 def rm(container: str) -> None:
     """Remove a bulbi container by name or ID."""
-    from bulbi.container.manager import remove_box
+    import docker
+
+    from bulbi.container.manager import BoxManager
 
     try:
-        remove_box(container)
+        BoxManager(docker.from_env()).remove(container)
     except Exception as exc:
         raise click.ClickException(str(exc))
 
@@ -340,10 +339,12 @@ def rm(container: str) -> None:
 @click.confirmation_option(prompt="This will remove ALL bulbi containers and images. Continue?")
 def reset() -> None:
     """Remove all bulbi containers and images."""
-    from bulbi.container.manager import reset_boxes
+    import docker
+
+    from bulbi.container.manager import BoxManager
 
     try:
-        reset_boxes()
+        BoxManager(docker.from_env()).reset()
     except Exception as exc:
         raise click.ClickException(str(exc))
 

@@ -14,6 +14,7 @@ from bulbi.validation.rules import (
     MountsPresentRule,
     OpenNetworkRule,
     ProfilesNarrowRule,
+    ResourceLimitsRule,
     SecretHostsRule,
     SecretSourceRule,
     WritableMountRule,
@@ -39,6 +40,7 @@ class SpecValidator:
                 ProfilesNarrowRule(),
                 SecretSourceRule(),
                 SecretHostsRule(),
+                ResourceLimitsRule(),
                 InterpreterToolsRule(tools),
             ]
         )

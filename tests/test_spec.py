@@ -281,3 +281,20 @@ def test_merge_keeps_unrelated_sections(sample_toml: Path):
     assert narrowed.network == spec.network
     assert narrowed.mounts == spec.mounts
     assert narrowed.box == spec.box
+
+
+@pytest.mark.parametrize(
+    ("memory", "expected"),
+    [("4GB", 4 * 1024**3), ("512mb", 512 * 1024**2), ("1.5 KB", 1536), ("10B", 10)],
+)
+def test_memory_bytes(memory: str, expected: int):
+    from bulbi.spec import LimitsSpec
+
+    assert LimitsSpec(memory=memory).memory_bytes == expected
+
+
+def test_memory_bytes_rejects_unknown_units():
+    from bulbi.spec import LimitsSpec
+
+    with pytest.raises(SpecError, match="invalid memory string"):
+        LimitsSpec(memory="4 gigs").memory_bytes  # noqa: B018

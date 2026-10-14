@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TypeVar
@@ -12,6 +13,8 @@ from bulbi.constants import DEFAULT_AGENT, DEFAULT_CPU, DEFAULT_MEMORY
 from bulbi.errors import SpecError
 
 _CONTENT_HASH_LENGTH = 16
+_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$")
+_MEMORY_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
@@ -104,6 +107,14 @@ class LimitsSpec:
 
     cpu: int = DEFAULT_CPU
     memory: str = DEFAULT_MEMORY
+
+    @property
+    def memory_bytes(self) -> int:
+        """``memory`` (e.g. ``4GB``, binary units) in bytes."""
+        match = _MEMORY_PATTERN.match(self.memory.upper())
+        if not match:
+            raise SpecError(f"invalid memory string: '{self.memory}'")
+        return int(float(match.group(1)) * _MEMORY_UNITS[match.group(2)])
 
 
 @dataclass(frozen=True)

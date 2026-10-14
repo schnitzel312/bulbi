@@ -140,3 +140,11 @@ def test_validator_runs_only_given_rules():
     result = SpecValidator([AlwaysWarn()]).validate(_make_spec(mounts=[]))
     assert result.ok
     assert result.warnings == ["box test"]
+
+
+def test_invalid_resource_limits_are_errors():
+    result = validate_spec(_make_spec(limits=LimitsSpec(cpu=0, memory="lots")))
+    assert result.errors == [
+        "limits.cpu must be a positive integer, got 0",
+        "limits.memory: invalid memory string: 'lots'",
+    ]

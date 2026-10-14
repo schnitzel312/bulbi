@@ -8,7 +8,8 @@ import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-MACOS_SYSTEM_NAME = "Darwin"
+from bulbi.constants import MACOS_SYSTEM_NAME
+
 _KEYCHAIN_TIMEOUT_SECONDS = 5
 
 CommandRunner = Callable[..., "subprocess.CompletedProcess[str]"]

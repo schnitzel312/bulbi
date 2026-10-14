@@ -1,263 +1,147 @@
-"""Container lifecycle manager for Bulbi boxes."""
+"""Lifecycle of box containers through an injected Docker client."""
 
 from __future__ import annotations
 
-import glob as globmod
 import hashlib
-import os
-import platform
-import re
-import subprocess
-import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import docker
+import docker.errors
 import docker.types
 
-from bulbi.agents import Agent, AgentRegistry
-from bulbi.constants import (
-    CONTAINER_WORKSPACE,
-    DOCKER_LABEL,
-    DOCKER_LABEL_BOX,
-    SPEC_FILENAME,
-)
-from bulbi.container.execution import DockerContainerExecutor
-from bulbi.image import build_image
-from bulbi.spec import BulbiSpec, ProfileMerger
+from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_BOX, DOCKER_LABEL_VALUE
+from bulbi.container.execution import ContainerExecutor, DockerContainerExecutor
+from bulbi.container.mounts import BindMount
+from bulbi.errors import SandboxError
+from bulbi.spec import BulbiSpec, LimitsSpec
 
-_MEMORY_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
-
-
-def _parse_memory(mem: str) -> int:
-    """Parse a memory string like '4GB' into bytes."""
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$", mem.upper())
-    if not match:
-        raise ValueError(f"invalid memory string: '{mem}'")
-    value = float(match.group(1))
-    unit = match.group(2)
-    return int(value * _MEMORY_UNITS[unit])
+_NAME_HASH_LENGTH = 8
+_STOP_TIMEOUT_SECONDS = 10
+_NANO_CPUS_PER_CPU = 10**9
+# Keeps the container alive; commands are run separately with `docker exec`.
+_IDLE_COMMAND = ["sleep", "infinity"]
+_BULBI_FILTER = {"label": f"{DOCKER_LABEL}={DOCKER_LABEL_VALUE}"}
 
 
-def _proxy_host() -> str:
-    if platform.system() == "Darwin":
-        return "host.docker.internal"
-    return "172.17.0.1"
+@dataclass(frozen=True)
+class RunningBox:
+    """A started box: its container ID and a way to run commands in it."""
+
+    id: str
+    executor: ContainerExecutor
 
 
-def _short_hash(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()[:8]
+@dataclass(frozen=True)
+class BoxInfo:
+    """Summary of a Bulbi-managed container, for ``bulbi ls``."""
+
+    id: str
+    name: str
+    box: str
+    status: str
 
 
-def _resolve_path(raw: str, project_root: Path) -> Path:
-    if raw.startswith("~"):
-        return Path(raw).expanduser().resolve()
-    p = Path(raw)
-    if p.is_absolute():
-        return p
-    return (project_root / p).resolve()
+class BoxManager:
+    """Creates, stops, lists, and removes Bulbi containers."""
 
+    def __init__(self, docker_client: Any) -> None:
+        self._docker = docker_client
 
-def _detect_git_worktree(project_root: Path) -> Path | None:
-    """If project_root/.git is a worktree file, return the real git dir."""
-    dot_git = project_root / ".git"
-    if dot_git.is_file():
-        text = dot_git.read_text().strip()
-        if text.startswith("gitdir:"):
-            gitdir = text.split(":", 1)[1].strip()
-            resolved = (project_root / gitdir).resolve()
-            if "worktrees" in resolved.parts:
-                idx = resolved.parts.index("worktrees")
-                return Path(*resolved.parts[:idx])
-            return resolved
-    return None
+    @staticmethod
+    def container_name(spec: BulbiSpec, project_root: Path) -> str:
+        """Stable per project, so a new run replaces the previous run's container."""
+        project_hash = hashlib.sha256(str(project_root).encode()).hexdigest()
+        return f"bulbi-{spec.box.name}-{project_hash[:_NAME_HASH_LENGTH]}"
 
+    def start(
+        self,
+        spec: BulbiSpec,
+        project_root: Path,
+        image_tag: str,
+        mounts: list[BindMount],
+        environment: Mapping[str, str],
+    ) -> RunningBox:
+        """Start an idle container for the box, replacing any stale one."""
+        name = self.container_name(spec, project_root)
+        with self._docker_errors(f"failed to start container {name}"):
+            self._remove_if_present(name)
+            container = self._docker.containers.run(
+                image_tag,
+                command=_IDLE_COMMAND,
+                entrypoint=[],
+                detach=True,
+                name=name,
+                labels={DOCKER_LABEL: DOCKER_LABEL_VALUE, DOCKER_LABEL_BOX: spec.box.name},
+                mounts=[self._to_docker_mount(mount) for mount in mounts],
+                environment=dict(environment),
+                stdin_open=True,
+                tty=True,
+                **self._resource_limits(spec.limits),
+            )
+        return RunningBox(id=container.id, executor=DockerContainerExecutor(container))
 
-def _is_tty() -> bool:
-    """Check if stdin/stdout are connected to a terminal."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    def stop(self, container_id: str) -> None:
+        """Stop and remove a container; a container that is already gone is fine."""
+        with self._docker_errors(f"failed to stop container {container_id}"):
+            try:
+                container = self._docker.containers.get(container_id)
+            except docker.errors.NotFound:
+                return
+            container.stop(timeout=_STOP_TIMEOUT_SECONDS)
+            container.remove()
 
+    def list_boxes(self) -> list[BoxInfo]:
+        with self._docker_errors("failed to list containers"):
+            containers = self._docker.containers.list(all=True, filters=_BULBI_FILTER)
+            return [
+                BoxInfo(
+                    id=container.short_id,
+                    name=container.name,
+                    box=container.labels.get(DOCKER_LABEL_BOX, ""),
+                    status=container.status,
+                )
+                for container in containers
+            ]
 
-# ---------------------------------------------------------------------------
-# Container lifecycle
-# ---------------------------------------------------------------------------
+    def remove(self, name_or_id: str) -> None:
+        with self._docker_errors(f"failed to remove container {name_or_id}"):
+            self._docker.containers.get(name_or_id).remove(force=True)
 
-def _build_mounts(
-    spec: BulbiSpec,
-    project_root: Path,
-) -> list[docker.types.Mount]:
-    """Build the list of Docker bind mounts from the spec."""
-    mounts: list[docker.types.Mount] = []
+    def reset(self) -> None:
+        """Remove every Bulbi container and image."""
+        with self._docker_errors("failed to reset"):
+            for container in self._docker.containers.list(all=True, filters=_BULBI_FILTER):
+                container.remove(force=True)
+            for image in self._docker.images.list(filters=_BULBI_FILTER):
+                self._docker.images.remove(image.id, force=True)
 
-    for m in spec.mounts:
-        host_path = _resolve_path(m.path, project_root)
-        if m.path == ".":
-            container_path = CONTAINER_WORKSPACE
-        else:
-            container_path = f"{CONTAINER_WORKSPACE}/{host_path.name}"
-        mounts.append(docker.types.Mount(
-            target=container_path,
-            source=str(host_path),
-            type="bind",
-            read_only=m.mode == "read-only",
-        ))
+    def _remove_if_present(self, name: str) -> None:
+        try:
+            self._docker.containers.get(name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
 
-        # Overlay excludes: mask existing host files with /dev/null.
-        for excl in m.exclude:
-            for matched_path in globmod.glob(str(host_path / excl)):
-                rel = Path(matched_path).relative_to(host_path)
-                mounts.append(docker.types.Mount(
-                    target=f"{container_path}/{rel}",
-                    source="/dev/null",
-                    type="bind",
-                    read_only=True,
-                ))
-
-    # Mount bulbi.toml as read-only.
-    spec_path = project_root / SPEC_FILENAME
-    if spec_path.exists():
-        mounts.append(docker.types.Mount(
-            target=f"{CONTAINER_WORKSPACE}/{SPEC_FILENAME}",
-            source=str(spec_path),
-            type="bind",
-            read_only=True,
-        ))
-
-    # Git worktree support.
-    real_git_dir = _detect_git_worktree(project_root)
-    if real_git_dir is not None:
-        mounts.append(docker.types.Mount(
-            target=f"{CONTAINER_WORKSPACE}/.git-main",
-            source=str(real_git_dir),
-            type="bind",
-            read_only=False,
-        ))
-
-    return mounts
-
-
-def _build_environment(
-    spec: BulbiSpec,
-    agent: Agent,
-    proxy_port: int,
-) -> dict[str, str]:
-    """Build the container environment dict."""
-    proxy = _proxy_host()
-    proxy_url = f"http://{proxy}:{proxy_port}"
-    env = {
-        "HTTP_PROXY": proxy_url,
-        "HTTPS_PROXY": proxy_url,
-        "http_proxy": proxy_url,
-        "https_proxy": proxy_url,
-    }
-
-    env.update(agent.environment)
-    env.update(agent.api_keys_from(os.environ))
-
-    return env
-
-
-def start_box(
-    spec: BulbiSpec,
-    project_root: Path,
-    profile: str | None = None,
-    proxy_port: int = 8080,
-) -> str:
-    """Build image and start a long-running container. Returns container ID."""
-    if profile is not None:
-        spec = ProfileMerger().resolve(spec, profile)
-
-    image_tag = build_image(spec, project_root)
-    client = docker.from_env()
-
-    box_name = spec.box.name
-    container_name = f"bulbi-{box_name}-{_short_hash(str(project_root))}"
-
-    mounts = _build_mounts(spec, project_root)
-    agent = AgentRegistry.builtin().resolve(spec.box.agent)
-    env = _build_environment(spec, agent, proxy_port)
-
-    # Remove any stale container with the same name.
-    try:
-        stale = client.containers.get(container_name)
-        stale.remove(force=True)
-    except docker.errors.NotFound:
-        pass
-
-    container = client.containers.run(
-        image_tag,
-        command=["sleep", "infinity"],
-        entrypoint=[],
-        detach=True,
-        name=container_name,
-        labels={DOCKER_LABEL: "true", DOCKER_LABEL_BOX: box_name},
-        mounts=mounts,
-        nano_cpus=spec.limits.cpu * 10**9,
-        mem_limit=_parse_memory(spec.limits.memory),
-        environment=env,
-        stdin_open=True,
-        tty=True,
-    )
-
-    # Inject agent config so it skips onboarding and picks up host auth.
-    agent.prepare_container(DockerContainerExecutor(container), env)
-
-    return container.id
-
-
-def run_in_box(container_id: str, command: list[str]) -> int:
-    """Run a command inside the container via `docker exec`.
-
-    Uses subprocess so the Docker CLI handles TTY allocation, signal
-    forwarding, and window resizing.
-    """
-    docker_cmd = ["docker", "exec"]
-    if _is_tty():
-        docker_cmd.append("-it")
-    docker_cmd.extend([container_id, "/entrypoint.sh"] + command)
-
-    result = subprocess.run(docker_cmd)
-    return result.returncode
-
-
-def stop_box(container_id: str) -> None:
-    client = docker.from_env()
-    try:
-        container = client.containers.get(container_id)
-        container.stop(timeout=10)
-        container.remove()
-    except docker.errors.NotFound:
-        pass
-
-
-def list_boxes() -> list[dict]:
-    client = docker.from_env()
-    containers = client.containers.list(
-        all=True,
-        filters={"label": f"{DOCKER_LABEL}=true"},
-    )
-    return [
-        {
-            "id": c.short_id,
-            "name": c.name,
-            "status": c.status,
-            "box": c.labels.get(DOCKER_LABEL_BOX, ""),
+    @staticmethod
+    def _resource_limits(limits: LimitsSpec) -> dict[str, int]:
+        return {
+            "nano_cpus": limits.cpu * _NANO_CPUS_PER_CPU,
+            "mem_limit": limits.memory_bytes,
         }
-        for c in containers
-    ]
 
+    @staticmethod
+    def _to_docker_mount(mount: BindMount) -> Any:
+        return docker.types.Mount(
+            target=mount.target, source=mount.source, type="bind", read_only=mount.read_only
+        )
 
-def remove_box(container_id: str) -> None:
-    client = docker.from_env()
-    container = client.containers.get(container_id)
-    container.remove(force=True)
-
-
-def reset_boxes() -> None:
-    """Remove all Bulbi containers and images."""
-    client = docker.from_env()
-
-    for c in client.containers.list(all=True, filters={"label": f"{DOCKER_LABEL}=true"}):
-        c.remove(force=True)
-
-    for img in client.images.list(filters={"label": f"{DOCKER_LABEL}=true"}):
-        client.images.remove(img.id, force=True)
+    @staticmethod
+    @contextmanager
+    def _docker_errors(action: str) -> Iterator[None]:
+        """Re-raise Docker SDK failures as :class:`SandboxError` with some context."""
+        try:
+            yield
+        except docker.errors.DockerException as exc:
+            raise SandboxError(f"{action}: {exc}") from exc

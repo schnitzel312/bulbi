@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bulbi.validation.rules.limits import ResourceLimitsRule
 from bulbi.validation.rules.mounts import MountsPresentRule, WritableMountRule
 from bulbi.validation.rules.network import EmptyAllowlistRule, OpenNetworkRule
 from bulbi.validation.rules.profiles import ProfilesNarrowRule
@@ -15,6 +16,7 @@ __all__ = [
     "MountsPresentRule",
     "OpenNetworkRule",
     "ProfilesNarrowRule",
+    "ResourceLimitsRule",
     "SecretHostsRule",
     "SecretSourceRule",
     "WritableMountRule",

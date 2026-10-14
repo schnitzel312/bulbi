@@ -1,12 +1,19 @@
 """Shared constants for Bulbi."""
 
+from __future__ import annotations
+
+# platform.system() on macOS (Docker Desktop host).
+MACOS_SYSTEM_NAME = "Darwin"
+
 # Container filesystem layout.
 CONTAINER_USER = "bulbi"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 CONTAINER_WORKSPACE = f"{CONTAINER_HOME}/workspace"
+ENTRYPOINT_PATH = "/entrypoint.sh"
 
 # Docker labels used to identify Bulbi-managed resources.
 DOCKER_LABEL = "bulbi"
+DOCKER_LABEL_VALUE = "true"
 DOCKER_LABEL_BOX = "bulbi.box"
 
 # Agent launched when the spec does not name one.
