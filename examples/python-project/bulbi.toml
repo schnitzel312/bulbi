@@ -10,7 +10,7 @@ agent = "claude"                 # what `bulbi run` launches by default
 allow = ["python@3.12", "poetry", "git", "rg"]
 
 [setup]
-# Runs once at image build, with network open to package registries only.
+# Runs once, the first time the container starts (network rules apply).
 run = ["poetry install"]
 
 [[mount]]
@@ -27,9 +27,10 @@ default = "deny"
 allow = ["pypi.org", "files.pythonhosted.org", "api.stripe.com"]
 
 [secrets]
-# The agent sees a placeholder; the host proxy swaps in the real value
-# only on requests to the listed hosts.
-STRIPE_TEST_KEY = { from = "env", hosts = ["api.stripe.com"] }
+# One line per secret. The agent can read these; the network policy limits where it
+# can send them. `bulbi check` lists everything that enters the box.
+STRIPE_TEST_KEY = { from = "env" }
+PYPI_RC         = { from = "file", source = "~/.pypirc", to = "file", path = "~/.pypirc" }
 
 [limits]
 cpu = 2
