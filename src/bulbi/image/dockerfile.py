@@ -39,7 +39,7 @@ class DockerfileBuilder:
         blocks = [
             [f"FROM {BASE_IMAGE}"],
             self._apt_install_block(spec_tools + agent_tools),
-            *self._post_install_blocks(spec_tools, label="{name}"),
+            *self._post_install_blocks(spec_tools),
             *self._agent_blocks(agent, agent_tools),
             self._user_block(),
             self._entrypoint_block(spec.setup.run),
@@ -65,22 +65,26 @@ class DockerfileBuilder:
         ]
 
     @staticmethod
-    def _post_install_blocks(tools: Iterable[ResolvedTool], label: str) -> Iterator[Block]:
+    def _post_install_blocks(tools: Iterable[ResolvedTool], suffix: str = "") -> Iterator[Block]:
         for tool in tools:
             if tool.post_install:
                 yield [
-                    f"# post-install: {label.format(name=tool.name)}",
+                    f"# post-install: {tool.name}{suffix}",
                     f"RUN {_LINE_CONTINUATION.join(tool.post_install)}",
                 ]
 
     def _agent_blocks(self, agent: Agent, agent_tools: list[ResolvedTool]) -> Iterator[Block]:
-        if not agent.install_commands:
-            return
-        yield from self._post_install_blocks(agent_tools, label="{name} (agent dependency)")
-        yield [
-            f"# Install agent: {agent.name}",
-            *(f"RUN {command}" for command in agent.install_commands),
-        ]
+        """Agent dependency post-installs, the agent's install commands, and its ENV.
+
+        Each part is independent: an agent with no install commands of its own (e.g. one
+        shipped by a required tool) still gets its dependencies and environment.
+        """
+        yield from self._post_install_blocks(agent_tools, suffix=" (agent dependency)")
+        if agent.install_commands:
+            yield [
+                f"# Install agent: {agent.name}",
+                *(f"RUN {command}" for command in agent.install_commands),
+            ]
         if agent.environment:
             yield [f"ENV {key}={value}" for key, value in agent.environment.items()]
 

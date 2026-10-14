@@ -156,3 +156,18 @@ def test_build_failure_becomes_sandbox_error():
     client.images.build = failing_build
     with pytest.raises(SandboxError, match="failed to build image"):
         _image_builder(client).build(_spec(), CLAUDE)
+
+
+class _PreinstalledAgent(UnmanagedAgent):
+    """An agent shipped by one of its required tools: nothing to install itself."""
+
+    required_tools = ("rust",)
+    environment = {"PRE_MODE": "1"}  # noqa: RUF012
+
+
+def test_agent_without_install_commands_keeps_dependencies_and_env():
+    dockerfile = _dockerfile(_spec(tools=["git"], agent="pre"), agent=_PreinstalledAgent("pre"))
+    assert "# post-install: rust (agent dependency)" in dockerfile
+    assert "sh.rustup.rs" in dockerfile
+    assert "ENV PRE_MODE=1" in dockerfile
+    assert "Install agent" not in dockerfile
