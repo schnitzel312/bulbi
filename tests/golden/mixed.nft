@@ -36,6 +36,7 @@ table inet bulbi {
 
     chain egress {
         type filter hook output priority 0; policy drop;
+        # No conntrack helpers are assigned: 'related' only admits ICMP errors.
         ct state established,related accept
         # DNS redirected to the resolver (still routed via eth0 at this point).
         meta l4proto { tcp, udp } ip daddr 127.0.0.1 th dport 5353 accept
@@ -63,6 +64,7 @@ table inet bulbi {
     # Nothing may open a connection into the box (R3).
     chain ingress {
         type filter hook input priority 0; policy drop;
+        # No conntrack helpers are assigned: 'related' only admits ICMP errors.
         ct state established,related accept
         iif "lo" accept
     }

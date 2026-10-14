@@ -30,6 +30,7 @@ DOCKER_EMBEDDED_DNS = "127.0.0.11"
 DNS_PORT = 53
 RESOLVER_PORT = 5353
 RESOLVER_HOST = "127.0.0.1"
+RELATED_NOTE = "No conntrack helpers are assigned: 'related' only admits ICMP errors."
 LOG_GROUP = 1
 LOG_PREFIX = "bulbi"
 LOG_FIELD_SEPARATOR = "|"
@@ -186,6 +187,9 @@ class NftablesBackend(FirewallBackend):
         out.add("", 0)
         out.add("chain egress {", 1)
         out.add("type filter hook output priority 0; policy drop;", 2)
+        # Keep it that way: assigning a conntrack helper (FTP, SIP, ...) would let 'related'
+        # accept helper-expected flows that bypass the ACL below.
+        out.add(f"# {RELATED_NOTE}", 2)
         out.add("ct state established,related accept", 2)
         out.add("# DNS redirected to the resolver (still routed via eth0 at this point).", 2)
         out.add(
@@ -235,6 +239,9 @@ class NftablesBackend(FirewallBackend):
         out.add("# Nothing may open a connection into the box (R3).", 1)
         out.add("chain ingress {", 1)
         out.add("type filter hook input priority 0; policy drop;", 2)
+        # Keep it that way: assigning a conntrack helper (FTP, SIP, ...) would let 'related'
+        # accept helper-expected flows that bypass the ACL below.
+        out.add(f"# {RELATED_NOTE}", 2)
         out.add("ct state established,related accept", 2)
         out.add('iif "lo" accept', 2)
         out.add("}", 1)

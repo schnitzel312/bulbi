@@ -140,9 +140,14 @@ class GatewayManager:
                 security_opt=["no-new-privileges"],
                 read_only=True,
                 tmpfs={READY_DIR: "size=64k"},
-                # DNS sent to any resolver is redirected to the loopback resolver; the kernel
-                # only routes such rewritten eth0 packets to 127.0.0.1 with route_localnet.
-                # New inbound connections stay dropped by the ingress chain.
+                # Why route_localnet (spec deviation 4): DNS the box sends to any resolver
+                # is redirected to the resolver on 127.0.0.1, and the kernel only delivers
+                # such rewritten eth0-sourced packets to a loopback address when this is on.
+                # It is contained: ingress drops every new inbound connection; egress refuses
+                # 127.0.0.11 except for the resolver's uid; the only loopback listener the
+                # box can reach is the resolver (the supervisor binds no socket). A DNAT to
+                # the gateway's eth0 address would avoid it, at the cost of a resolver bound
+                # to 0.0.0.0; the reviewer and I judged that not worth the complexity.
                 sysctls={"net.ipv4.conf.all.route_localnet": "1"},
                 pids_limit=_GATEWAY_PIDS_LIMIT,
                 mem_limit=_GATEWAY_MEMORY,

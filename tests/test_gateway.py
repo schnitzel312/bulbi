@@ -852,3 +852,10 @@ def test_redirected_dns_is_accepted_before_the_protected_ranges():
     accept = "meta l4proto { tcp, udp } ip daddr 127.0.0.1 th dport 5353 accept"
     assert accept in rendered
     assert rendered.index(accept) < rendered.index("127.0.0.0/8")
+
+
+def test_related_accept_is_pinned_to_icmp_errors_review_minor_4():
+    rendered = NftablesBackend().render(NetworkPolicy.parse("deny", []), CONTEXT)
+    note = "# No conntrack helpers are assigned: 'related' only admits ICMP errors."
+    assert rendered.count(note) == 2  # egress and ingress
+    assert "ct helper" not in rendered
