@@ -16,6 +16,7 @@ from bulbi.cli.context import AppContext
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
+from bulbi.gateway.config import HostAccess
 from bulbi.image import ImageBuilder
 from bulbi.spec import SpecLoader
 from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
@@ -65,7 +66,8 @@ class Harness:
             console=Console(width=200),
             docker_factory=self._docker_factory,
             terminal=TerminalExec(runner=self.runner, is_terminal=lambda: False),
-            environment=EnvironmentBuilder(host_env={}, system="Darwin"),
+            environment=EnvironmentBuilder(host_env={}),
+            host_access=HostAccess.DOCKER_DESKTOP,
             agents=AgentRegistry(
                 [
                     ClaudeAgent(credentials=NoCredentialProvider(), host_home=self.project_root),
@@ -154,9 +156,10 @@ def test_run_launches_agent_and_cleans_up(cli: Harness):
     assert "Starting container..." in result.output
     assert "Running: claude --dangerously-skip-permissions" in result.output
     assert cli.executed == [["claude", "--dangerously-skip-permissions"]]
-    assert len(cli.docker.images.builds) == 1
-    (container,) = {id(c): c for c in cli.docker.containers.by_key.values()}.values()
-    assert container.removed
+    assert len(cli.docker.box_builds) == 1
+    containers = {id(c): c for c in cli.docker.containers.by_key.values()}.values()
+    assert len(containers) == 2  # box + gateway
+    assert all(container.removed for container in containers)
 
 
 def test_run_with_explicit_command_and_profile(cli: Harness):
@@ -165,7 +168,7 @@ def test_run_with_explicit_command_and_profile(cli: Harness):
     assert result.exit_code == 0
     assert cli.executed == [["pytest", "-q"]]
     # The profile was applied: its narrower tool list is what got built into the image.
-    (build,) = cli.docker.images.builds
+    (build,) = cli.docker.box_builds
     assert "python3" not in build["dockerfile"]
     root_spec = SpecLoader().load(cli.project_root)
     assert build["tag"] != ImageBuilder.tag_for(root_spec)
@@ -183,7 +186,7 @@ def test_run_reuses_cached_image(cli: Harness):
     cli.write_spec()
     cli.invoke("run")
     cli.invoke("run")
-    assert len(cli.docker.images.builds) == 1
+    assert len(cli.docker.box_builds) == 1
 
 
 def test_shell_opens_bash(cli: Harness):
@@ -298,7 +301,7 @@ def test_image_tag_matches_spec_hash(cli: Harness):
     cli.write_spec()
     cli.invoke("run")
     expected = ImageBuilder.tag_for(SpecLoader().load(cli.project_root))
-    assert cli.docker.images.builds[0]["tag"] == expected
+    assert cli.docker.box_builds[0]["tag"] == expected
 
 
 def test_run_with_profile_widening_network_default_fails_before_docker(cli: Harness):

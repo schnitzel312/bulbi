@@ -65,8 +65,16 @@ class FakeContainer:
         self.archives: list[tuple[str, bytes]] = []
         self.stopped = False
         self.removed = False
+        self.attrs: dict = {"NetworkSettings": {"Networks": {}}}
+        self.log_output = b""
 
-    def exec_run(self, argv: list[str], user: str) -> FakeExecRun:
+    def reload(self) -> None:
+        pass
+
+    def logs(self, tail: int) -> bytes:
+        return self.log_output
+
+    def exec_run(self, argv: list[str], user: str | None = None) -> FakeExecRun:
         self.exec_calls.append((argv, user))
         return self.exec_responses.get(tuple(argv), FakeExecRun())
 
@@ -92,7 +100,12 @@ class FakeContainers:
 
     def run(self, image: str, **kwargs) -> FakeContainer:
         self.run_calls.append((image, kwargs))
-        return self.add(FakeContainer(kwargs["name"], kwargs.get("labels")))
+        container = FakeContainer(kwargs["name"], kwargs.get("labels"))
+        if "network" in kwargs:
+            container.attrs["NetworkSettings"]["Networks"][kwargs["network"]] = {
+                "IPAddress": FakeNetworks.GATEWAY_CONTAINER_ADDRESS
+            }
+        return self.add(container)
 
     def get(self, key: str) -> FakeContainer:
         container = self.by_key.get(key)
@@ -121,8 +134,10 @@ class FakeImages:
             raise docker.errors.ImageNotFound(f"No such image: {tag}")
         return FakeImage(tag)
 
-    def build(self, fileobj, tag: str, labels: dict, rm: bool) -> None:
-        self.builds.append({"dockerfile": fileobj.read().decode(), "tag": tag, "labels": labels})
+    def build(self, fileobj, tag: str, labels: dict, rm: bool, custom_context=False) -> None:
+        data = fileobj.read()
+        dockerfile = None if custom_context else data.decode()
+        self.builds.append({"dockerfile": dockerfile, "tag": tag, "labels": labels, "data": data})
         self.tags.add(tag)
 
     def list(self, filters: dict) -> list[FakeImage]:
@@ -133,10 +148,54 @@ class FakeImages:
         self.tags.discard(image_id)
 
 
+class FakeNetwork:
+    def __init__(self, name: str, labels: dict[str, str]) -> None:
+        self.id = f"net-{name}"
+        self.name = name
+        self.labels = labels
+        self.removed = False
+        self.attrs = {"IPAM": {"Config": [{"Gateway": FakeNetworks.BRIDGE_ADDRESS}]}}
+
+    def reload(self) -> None:
+        pass
+
+    def remove(self) -> None:
+        self.removed = True
+
+
+class FakeNetworks:
+    BRIDGE_ADDRESS = "172.30.0.1"
+    GATEWAY_CONTAINER_ADDRESS = "172.30.0.2"
+
+    def __init__(self) -> None:
+        self.created: list[FakeNetwork] = []
+
+    def create(self, name: str, driver: str, labels: dict, check_duplicate: bool) -> FakeNetwork:
+        network = FakeNetwork(name, labels)
+        self.created.append(network)
+        return network
+
+    def get(self, key: str) -> FakeNetwork:
+        for network in self.created:
+            if key in (network.id, network.name) and not network.removed:
+                return network
+        raise docker.errors.NotFound(f"No such network: {key}")
+
+    def list(self, names=None, filters=None) -> list[FakeNetwork]:
+        live = [n for n in self.created if not n.removed]
+        return [n for n in live if names is None or n.name in names]
+
+
 class FakeDocker:
     def __init__(self, images: set[str] | None = None) -> None:
         self.images = FakeImages(images)
         self.containers = FakeContainers()
+        self.networks = FakeNetworks()
+
+    @property
+    def box_builds(self) -> list[dict]:
+        """Box image builds (the gateway image is built from a custom context)."""
+        return [build for build in self.images.builds if build["dockerfile"] is not None]
 
 
 class RecordingRunner:

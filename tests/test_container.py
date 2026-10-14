@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bulbi.agents import ClaudeAgent, NoCredentialProvider, UnmanagedAgent
+from bulbi.agents import ClaudeAgent, NoCredentialProvider
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.manager import BoxInfo, BoxManager
 from bulbi.container.mounts import BindMount, MountPlanner
@@ -76,23 +76,15 @@ def test_regular_git_checkout_needs_no_extra_mount(tmp_path: Path):
 # ---- EnvironmentBuilder -----------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("system", "host"), [("Darwin", "host.docker.internal"), ("Linux", "172.17.0.1")]
-)
-def test_proxy_variables_point_at_host(system: str, host: str):
-    env = EnvironmentBuilder(host_env={}, system=system).build(UnmanagedAgent("x"), 4321)
-    url = f"http://{host}:4321"
-    assert env == {"HTTP_PROXY": url, "HTTPS_PROXY": url, "http_proxy": url, "https_proxy": url}
-
-
 def test_agent_environment_and_api_keys_are_added():
     agent = ClaudeAgent(credentials=NoCredentialProvider())
     env = EnvironmentBuilder(
-        host_env={"ANTHROPIC_API_KEY": "sk-1", "OPENAI_API_KEY": "nope"}, system="Darwin"
-    ).build(agent, 1)
+        host_env={"ANTHROPIC_API_KEY": "sk-1", "OPENAI_API_KEY": "nope"}
+    ).build(agent)
     assert env["ANTHROPIC_API_KEY"] == "sk-1"
     assert env["CLAUDE_CODE_NO_FLICKER"] == "1"
     assert "OPENAI_API_KEY" not in env
+    assert not any("PROXY" in key.upper() for key in env)  # the gateway needs no proxy env
 
 
 # ---- TerminalExec -----------------------------------------------------------

@@ -17,12 +17,36 @@ import socket
 import threading
 from collections.abc import Iterable
 
+from bulbi.errors import RuleError
+from bulbi.gateway.policy import NetworkPolicy
+from bulbi.gateway.rules import HostRule, Protocol
+
 logger = logging.getLogger(__name__)
 
 LOOPBACK = "127.0.0.1"
 _BUFFER = 65536
 _ACCEPT_POLL_SECONDS = 0.2
 _CONNECT_TIMEOUT_SECONDS = 5.0
+MAX_RELAYED_PORTS = 256
+
+
+def relay_ports(policy: NetworkPolicy) -> list[int]:
+    """TCP ports named by ``host`` allow rules; a portless ``host`` rule cannot be relayed."""
+    ports: set[int] = set()
+    for rule in policy.allow:
+        if not isinstance(rule, HostRule) or Protocol.TCP not in rule.protocols:
+            continue
+        if rule.ports.is_all:
+            # TODO(bulbi): relaying every port is not supported; list the ports instead.
+            logger.warning("'%s' has no ports; the Linux host relay ignores it", rule)
+            continue
+        for port_range in rule.ports.ranges:
+            ports.update(range(port_range.low, port_range.high + 1))
+    if len(ports) > MAX_RELAYED_PORTS:
+        raise RuleError(
+            f"host rules name {len(ports)} ports; the relay supports at most {MAX_RELAYED_PORTS}"
+        )
+    return sorted(ports)
 
 
 class HostRelay:

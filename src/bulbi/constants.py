@@ -15,6 +15,8 @@ ENTRYPOINT_PATH = "/entrypoint.sh"
 DOCKER_LABEL = "bulbi"
 DOCKER_LABEL_VALUE = "true"
 DOCKER_LABEL_BOX = "bulbi.box"
+DOCKER_LABEL_ROLE = "bulbi.role"
+GATEWAY_ROLE = "gateway"
 
 # Agent launched when the spec does not name one.
 DEFAULT_AGENT = "claude"

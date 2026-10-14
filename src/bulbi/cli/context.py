@@ -11,12 +11,16 @@ from rich.console import Console
 
 from bulbi.agents import Agent, AgentRegistry
 from bulbi.container.environment import EnvironmentBuilder
+from bulbi.container.gateway import GatewayManager
 from bulbi.container.manager import BoxManager
 from bulbi.container.terminal import TerminalExec
 from bulbi.detection import DetectorRegistry
 from bulbi.docker_sdk import connect_to_docker, docker_errors
+from bulbi.gateway.config import HostAccess
 from bulbi.image import DockerfileBuilder, ImageBuilder
+from bulbi.image.gateway import GatewayImageBuilder
 from bulbi.sandbox import SandboxServices
+from bulbi.sandbox.session import detect_host_access
 from bulbi.spec import BulbiSpec, ProfileMerger, SpecLoader
 from bulbi.tools import ToolRegistry
 from bulbi.validation import SpecValidator
@@ -44,6 +48,7 @@ class AppContext:
         agents: AgentRegistry | None = None,
         detectors: DetectorRegistry | None = None,
         spec_loader: SpecLoader | None = None,
+        host_access: HostAccess | None = None,
     ) -> None:
         self.project_root = project_root
         self.console = console or Console()
@@ -56,6 +61,7 @@ class AppContext:
         self._docker_factory = docker_factory
         self._terminal = terminal or TerminalExec()
         self._environment = environment or EnvironmentBuilder()
+        self._host_access = host_access or detect_host_access()
 
     def load_spec(self, profile: str | None = None) -> BulbiSpec:
         """The project's spec, narrowed by ``profile`` when one is given."""
@@ -76,7 +82,10 @@ class AppContext:
     def sandbox_services(self) -> SandboxServices:
         return SandboxServices(
             images=ImageBuilder(self.docker, DockerfileBuilder(self.tools)),
+            gateway_images=GatewayImageBuilder(self.docker),
             boxes=self.box_manager(),
+            gateways=GatewayManager(self.docker),
             terminal=self._terminal,
             environment=self._environment,
+            host_access=self._host_access,
         )

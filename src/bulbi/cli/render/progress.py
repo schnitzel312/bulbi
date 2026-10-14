@@ -19,6 +19,9 @@ class ConsoleSandboxObserver(SandboxObserver):
     def building_image(self, spec: BulbiSpec) -> None:
         self._console.print(f"[bold]Building image for [cyan]{spec.box.name}[/cyan]...[/bold]")
 
+    def starting_gateway(self) -> None:
+        self._console.print("[bold]Starting network gateway...[/bold]")
+
     def starting_container(self) -> None:
         self._console.print("[bold]Starting container...[/bold]")
 

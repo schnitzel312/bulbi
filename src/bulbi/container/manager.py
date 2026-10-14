@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from bulbi.agents.ports import ContainerHandle
-from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_BOX, DOCKER_LABEL_VALUE
+from bulbi.constants import (
+    DOCKER_LABEL,
+    DOCKER_LABEL_BOX,
+    DOCKER_LABEL_ROLE,
+    DOCKER_LABEL_VALUE,
+    GATEWAY_ROLE,
+)
 from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.mounts import BindMount
 from bulbi.docker_sdk import docker_errors, docker_sdk
@@ -19,6 +25,7 @@ from bulbi.spec import BulbiSpec, LimitsSpec
 _NAME_HASH_LENGTH = 8
 _STOP_TIMEOUT_SECONDS = 10
 _NANO_CPUS_PER_CPU = 10**9
+BOX_PIDS_LIMIT = 512
 # Keeps the container alive; commands are run separately with `docker exec`.
 _IDLE_COMMAND = ["sleep", "infinity"]
 _BULBI_FILTER = {"label": f"{DOCKER_LABEL}={DOCKER_LABEL_VALUE}"}
@@ -61,8 +68,13 @@ class BoxManager:
         image_tag: str,
         mounts: list[BindMount],
         environment: Mapping[str, str],
+        network_container: str | None = None,
     ) -> RunningBox:
-        """Start an idle container for the box, replacing any stale one."""
+        """Start an idle, hardened container for the box, replacing any stale one.
+
+        With ``network_container`` the box joins that container's network namespace
+        (the gateway's), so it has no network of its own.
+        """
         name = self.container_name(spec, project_root)
         with docker_errors(f"failed to start container {name}"):
             self._remove_if_present(name)
@@ -77,6 +89,10 @@ class BoxManager:
                 environment=dict(environment),
                 stdin_open=True,
                 tty=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges"],
+                pids_limit=BOX_PIDS_LIMIT,
+                **self._network(network_container),
                 **self._resource_limits(spec.limits),
             )
         return RunningBox(id=container.id, handle=DockerContainerHandle(container))
@@ -92,6 +108,7 @@ class BoxManager:
             container.remove()
 
     def list_boxes(self) -> list[BoxInfo]:
+        """Bulbi boxes; gateways are infrastructure and stay hidden."""
         with docker_errors("failed to list containers"):
             containers = self._docker.containers.list(all=True, filters=_BULBI_FILTER)
             return [
@@ -102,6 +119,7 @@ class BoxManager:
                     status=container.status,
                 )
                 for container in containers
+                if container.labels.get(DOCKER_LABEL_ROLE) != GATEWAY_ROLE
             ]
 
     def remove(self, name_or_id: str) -> None:
@@ -109,16 +127,24 @@ class BoxManager:
             self._docker.containers.get(name_or_id).remove(force=True)
 
     def reset(self) -> None:
-        """Remove every Bulbi container and image."""
+        """Remove every Bulbi box, gateway, network and image (boxes before gateways)."""
         with docker_errors("failed to reset"):
-            for container in self._docker.containers.list(all=True, filters=_BULBI_FILTER):
+            containers = self._docker.containers.list(all=True, filters=_BULBI_FILTER)
+            containers.sort(key=lambda c: c.labels.get(DOCKER_LABEL_ROLE) == GATEWAY_ROLE)
+            for container in containers:
                 container.remove(force=True)
+            for network in self._docker.networks.list(filters=_BULBI_FILTER):
+                network.remove()
             for image in self._docker.images.list(filters=_BULBI_FILTER):
                 self._docker.images.remove(image.id, force=True)
 
     def _remove_if_present(self, name: str) -> None:
         with suppress(docker_sdk().errors.NotFound):
             self._docker.containers.get(name).remove(force=True)
+
+    @staticmethod
+    def _network(network_container: str | None) -> dict[str, str]:
+        return {"network_mode": f"container:{network_container}"} if network_container else {}
 
     @staticmethod
     def _resource_limits(limits: LimitsSpec) -> dict[str, int]:

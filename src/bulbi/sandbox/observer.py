@@ -13,8 +13,11 @@ class SandboxObserver:
     def building_image(self, spec: BulbiSpec) -> None:
         """The box's image is about to be built (or reused from cache)."""
 
+    def starting_gateway(self) -> None:
+        """The images are ready; the network and its gateway are about to start."""
+
     def starting_container(self) -> None:
-        """The proxy is up and the container is about to start."""
+        """The gateway has loaded its rules; the box is about to start."""
 
     def running(self, label: str, command: Sequence[str]) -> None:
         """``command`` is about to run in the box; ``label`` says what it is for."""

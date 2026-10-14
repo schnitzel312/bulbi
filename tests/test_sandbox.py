@@ -1,25 +1,25 @@
-"""Tests for the sandbox session orchestration.
-
-Docker is always faked. Most tests also use a fake proxy; a few start the real proxy
-on localhost to check that its port is bound and released.
-"""
+"""Tests for the sandbox session orchestration (fake Docker, fake relay)."""
 
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 import docker.errors
 import pytest
 
 from bulbi.agents import Agent, ContainerHandle
 from bulbi.container.environment import EnvironmentBuilder
+from bulbi.container.gateway import GatewayManager
 from bulbi.container.manager import BoxManager
 from bulbi.container.terminal import TerminalExec
-from bulbi.errors import SandboxError
+from bulbi.errors import SandboxError, SpecError
+from bulbi.gateway.config import CONFIG_ENV, GatewayConfig, HostAccess
 from bulbi.image import DockerfileBuilder, ImageBuilder
+from bulbi.image.gateway import GatewayImageBuilder
 from bulbi.sandbox import SandboxObserver, SandboxServices, SandboxSession
-from bulbi.spec import BoxSpec, BulbiSpec, MountSpec, ToolsSpec
+from bulbi.spec import BoxSpec, BulbiSpec, MountSpec, NetworkSpec, ToolsSpec
 from bulbi.tools import ToolRegistry
-from tests.fakes import FakeDocker, FakeProxy, FakeProxyFactory, RecordingRunner
+from tests.fakes import FakeDocker, FakeExecRun, FakeNetworks, RecordingRunner
 
 
 class RecordingAgent(Agent):
@@ -43,11 +43,32 @@ class RecordingObserver(SandboxObserver):
     def building_image(self, spec):
         self.events.append(f"build {spec.box.name}")
 
+    def starting_gateway(self):
+        self.events.append("gateway")
+
     def starting_container(self):
-        self.events.append("start")
+        self.events.append("box")
 
     def running(self, label, command):
         self.events.append(f"{label}: {' '.join(command)}")
+
+
+class FakeRelay:
+    def __init__(self, bind_host: str, ports) -> None:
+        self.bind_host = bind_host
+        self.ports = list(ports)
+        self.started = False
+        self.stopped = False
+        self.allowed_source: str | None = None
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def allow_source(self, address: str) -> None:
+        self.allowed_source = address
 
 
 @pytest.fixture
@@ -61,58 +82,102 @@ def runner() -> RecordingRunner:
 
 
 @pytest.fixture
-def services(client: FakeDocker, runner: RecordingRunner) -> SandboxServices:
+def relays() -> list[FakeRelay]:
+    return []
+
+
+@pytest.fixture
+def services(client: FakeDocker, runner: RecordingRunner, relays) -> SandboxServices:
+    def relay_factory(bind_host, ports):
+        relays.append(FakeRelay(bind_host, ports))
+        return relays[-1]
+
     return SandboxServices(
         images=ImageBuilder(client, DockerfileBuilder(ToolRegistry.builtin())),
+        gateway_images=GatewayImageBuilder(client),
         boxes=BoxManager(client),
+        gateways=GatewayManager(client, clock=lambda: 0.0, sleep=lambda _: None),
         terminal=TerminalExec(runner=runner, is_terminal=lambda: False),
-        environment=EnvironmentBuilder(host_env={}, system="Darwin"),
+        environment=EnvironmentBuilder(host_env={}),
+        relay_factory=relay_factory,  # type: ignore[arg-type]
+        host_access=HostAccess.DOCKER_DESKTOP,
+        log_owner=(501, 20),
     )
 
 
-def _spec() -> BulbiSpec:
+def _spec(allow=("pypi.org",), deny=()) -> BulbiSpec:
     return BulbiSpec(
         spec_version="0.1",
         box=BoxSpec(name="demo", agent="recorder"),
         tools=ToolsSpec(allow=["git"]),
         mounts=[MountSpec(path=".")],
+        network=NetworkSpec(allow=list(allow), deny=list(deny)),
     )
 
 
-def test_session_runs_command_and_cleans_up(tmp_path, client, runner, services):
+def _live(client: FakeDocker) -> list:
+    return [
+        c for c in {id(c): c for c in client.containers.by_key.values()}.values() if not c.removed
+    ]
+
+
+def _run_kwargs(client: FakeDocker) -> tuple[dict, dict]:
+    (_, gateway), (_, box) = client.containers.run_calls
+    return gateway, box
+
+
+def test_session_starts_gateway_then_box_and_cleans_up(tmp_path, client, runner, services):
     agent = RecordingAgent()
     observer = RecordingObserver()
 
     with SandboxSession(_spec(), tmp_path, agent, services, observer) as session:
         assert session.run(["make", "test"], "Running") == 7
-        (container,) = client.containers.list(all=True, filters={})
+        assert len(_live(client)) == 2
 
-    assert len(client.images.builds) == 1  # bug (c): the image is built exactly once
-    assert observer.events == ["build demo", "start", "Running: make test"]
-    assert runner.calls == [["docker", "exec", container.id, "/entrypoint.sh", "make", "test"]]
-    assert container.stopped and container.removed
-    proxy_url = agent.prepared_with[0]["HTTP_PROXY"]
-    assert proxy_url.startswith("http://host.docker.internal:")
-
-
-def test_proxy_port_is_released_after_session(tmp_path, services):
-    import socket
-
-    agent = RecordingAgent()
-    with SandboxSession(_spec(), tmp_path, agent, services):
-        port = int(agent.prepared_with[0]["HTTP_PROXY"].rsplit(":", 1)[1])
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            pass
-    with pytest.raises(OSError), socket.create_connection(("127.0.0.1", port), timeout=2):
-        pass
+    gateway, box = _run_kwargs(client)
+    assert box["network_mode"] == f"container:id-{gateway['name']}"
+    assert observer.events == ["build demo", "gateway", "box", "Running: make test"]
+    assert runner.calls[0][-2:] == ["make", "test"]
+    assert _live(client) == []
+    assert all(network.removed for network in client.networks.created)
+    assert agent.prepared_with == [{}]  # no proxy variables: tools need no configuration
 
 
-def test_failed_agent_preparation_still_removes_container(tmp_path, client, services):
-    session = SandboxSession(_spec(), tmp_path, RecordingAgent(fail=True), services)
-    with pytest.raises(SandboxError, match="prepare failed"):
-        session.__enter__()
-    (container,) = {id(c): c for c in client.containers.by_key.values()}.values()
-    assert container.stopped and container.removed
+def test_box_is_hardened(tmp_path, client, services):
+    with SandboxSession(_spec(), tmp_path, RecordingAgent(), services):
+        _, box = _run_kwargs(client)
+    assert box["cap_drop"] == ["ALL"]
+    assert box["security_opt"] == ["no-new-privileges"]
+    assert box["pids_limit"] == 512
+    assert "ports" not in box
+    assert "extra_hosts" not in box
+    assert "privileged" not in box
+
+
+def test_gateway_is_hardened_and_configured(tmp_path, client, services):
+    with SandboxSession(_spec(allow=["pypi.org", "host:5432"], deny=["evil.test"]), tmp_path,
+                        RecordingAgent(), services):  # fmt: skip
+        gateway, _ = _run_kwargs(client)
+    assert gateway["cap_drop"] == ["ALL"]
+    assert gateway["cap_add"] == ["NET_ADMIN", "SETUID", "SETGID"]
+    assert gateway["read_only"] is True
+    assert gateway["security_opt"] == ["no-new-privileges"]
+    assert gateway["labels"]["bulbi.role"] == "gateway"
+    assert gateway["network"] == client.networks.created[0].name
+    assert "ports" not in gateway
+    config = GatewayConfig.from_json(gateway["environment"][CONFIG_ENV])
+    assert (config.default, config.allow, config.deny) == (
+        "deny", ["pypi.org", "host:5432"], ["evil.test"],
+    )  # fmt: skip
+    assert config.log_owner == (501, 20)
+    assert gateway["mounts"][0]["Source"] == str(tmp_path / ".bulbi")
+
+
+def test_malformed_rules_fail_before_anything_starts(tmp_path, client, services):
+    with pytest.raises(SpecError, match=r"\[::1"):
+        SandboxSession(_spec(allow=["[::1"]), tmp_path, RecordingAgent(), services).__enter__()
+    assert client.containers.run_calls == []
+    assert client.networks.created == []
 
 
 def test_run_requires_started_session(tmp_path, services):
@@ -121,81 +186,153 @@ def test_run_requires_started_session(tmp_path, services):
         session.run(["true"], "Running")
 
 
-def test_mounts_are_planned_for_the_project(tmp_path, client, services):
-    with SandboxSession(_spec(), tmp_path, RecordingAgent(), services):
-        ((_, kwargs),) = client.containers.run_calls
-    assert kwargs["mounts"][0]["Source"] == str(tmp_path.resolve())
+# ---- teardown completeness on failure at every step (spec §6.1) -----------------------
 
 
-# ---- Cleanup on the failure paths (M2) ------------------------------------------
+def _assert_nothing_left(client: FakeDocker) -> None:
+    assert _live(client) == []
+    assert all(network.removed for network in client.networks.created)
 
 
-@pytest.fixture
-def proxies() -> FakeProxyFactory:
-    return FakeProxyFactory()
-
-
-@pytest.fixture
-def fake_proxy_services(services: SandboxServices, proxies: FakeProxyFactory) -> SandboxServices:
-    return replace(services, proxy_factory=proxies)
-
-
-def _live_containers(client: FakeDocker) -> list:
-    return [c for c in client.containers.by_key.values() if not c.removed]
-
-
-def test_build_failure_starts_nothing(tmp_path, client, proxies, fake_proxy_services):
+def test_build_failure_starts_nothing(tmp_path, client, services):
     def failing_build(**kwargs):
         raise docker.errors.BuildError("boom", build_log=[])
 
     client.images.build = failing_build
     with pytest.raises(SandboxError, match="failed to build image"):
-        SandboxSession(_spec(), tmp_path, RecordingAgent(), fake_proxy_services).__enter__()
-    assert proxies.created == []
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services).__enter__()
     assert client.containers.run_calls == []
+    assert client.networks.created == []
 
 
-def test_container_start_failure_stops_proxy(tmp_path, client, proxies, fake_proxy_services):
+def test_network_failure_leaves_nothing(tmp_path, client, services):
+    def failing_create(*args, **kwargs):
+        raise docker.errors.APIError("pool overlaps")
+
+    client.networks.create = failing_create
+    with pytest.raises(SandboxError, match="pool overlaps"):
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services).__enter__()
+    _assert_nothing_left(client)
+
+
+def test_gateway_start_failure_removes_network(tmp_path, client, services):
     def failing_run(image, **kwargs):
-        raise docker.errors.APIError("port conflict")
+        raise docker.errors.APIError("no such image")
 
     client.containers.run = failing_run
+    with pytest.raises(SandboxError, match="no such image"):
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services).__enter__()
+    _assert_nothing_left(client)
+
+
+def test_gateway_that_never_becomes_ready_is_torn_down(tmp_path, client, services):
+    real_run = client.containers.run
+
+    def gateway_never_ready(image, **kwargs):
+        container = real_run(image, **kwargs)
+        container.exec_responses[("cat", "/run/bulbi/ready")] = FakeExecRun(1, b"")
+        container.log_output = b"nft: syntax error"
+        return container
+
+    client.containers.run = gateway_never_ready
+    ticks = iter([0.0, 5.0, 11.0])
+    gateways = GatewayManager(client, clock=lambda: next(ticks), sleep=lambda _: None)
+    with pytest.raises(SandboxError, match="did not become ready within 10s:\nnft: syntax error"):
+        SandboxSession(
+            _spec(), tmp_path, RecordingAgent(), replace(services, gateways=gateways)
+        ).__enter__()
+    _assert_nothing_left(client)
+
+
+def test_gateway_that_exits_during_startup_is_reported(tmp_path, client, services):
+    real_run = client.containers.run
+
+    def gateway_crashes(image, **kwargs):
+        container = real_run(image, **kwargs)
+        container.status = "exited"
+        container.log_output = b"Traceback: boom"
+        return container
+
+    client.containers.run = gateway_crashes
+    with pytest.raises(SandboxError, match="exited during startup:\nTraceback: boom"):
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services).__enter__()
+    _assert_nothing_left(client)
+
+
+def test_box_start_failure_stops_gateway_and_network(tmp_path, client, services):
+    real_run = client.containers.run
+
+    def box_fails(image, **kwargs):
+        if "network_mode" in kwargs:
+            raise docker.errors.APIError("port conflict")
+        return real_run(image, **kwargs)
+
+    client.containers.run = box_fails
     with pytest.raises(SandboxError, match="port conflict"):
-        SandboxSession(_spec(), tmp_path, RecordingAgent(), fake_proxy_services).__enter__()
-    (proxy,) = proxies.created
-    assert proxy.started and proxy.stopped
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services).__enter__()
+    _assert_nothing_left(client)
 
 
-def test_prepare_failure_stops_container_and_proxy(tmp_path, client, proxies, fake_proxy_services):
-    session = SandboxSession(_spec(), tmp_path, RecordingAgent(fail=True), fake_proxy_services)
+def test_prepare_failure_tears_everything_down(tmp_path, client, services):
     with pytest.raises(SandboxError, match="prepare failed"):
-        session.__enter__()
-    assert _live_containers(client) == []
-    assert proxies.created[0].stopped
+        SandboxSession(_spec(), tmp_path, RecordingAgent(fail=True), services).__enter__()
+    _assert_nothing_left(client)
 
 
-def test_interrupted_command_still_cleans_up(
-    tmp_path, client, runner, proxies, fake_proxy_services
-):
+def test_interrupted_command_still_cleans_up(tmp_path, client, services):
     def interrupted(argv):
         raise KeyboardInterrupt
 
     services = replace(
-        fake_proxy_services, terminal=TerminalExec(runner=interrupted, is_terminal=lambda: False)
+        services, terminal=TerminalExec(runner=interrupted, is_terminal=lambda: False)
     )
     with (
         pytest.raises(KeyboardInterrupt),
         SandboxSession(_spec(), tmp_path, RecordingAgent(), services) as session,
     ):
         session.run(["sleep", "100"], "Running")
-    assert _live_containers(client) == []
-    assert proxies.created[0].stopped
+    _assert_nothing_left(client)
 
 
-def test_proxy_receives_spec_network_and_project(tmp_path, proxies, fake_proxy_services):
-    agent = RecordingAgent()
-    with SandboxSession(_spec(), tmp_path, agent, fake_proxy_services):
+# ---- host relay (Linux) ---------------------------------------------------------------
+
+
+def test_linux_host_rules_start_a_relay_for_the_gateway(tmp_path, client, services, relays):
+    services = replace(services, host_access=HostAccess.BRIDGE_RELAY)
+    spec = _spec(allow=["pypi.org", "host:5432,6000-6001"])
+    with SandboxSession(spec, tmp_path, RecordingAgent(), services):
+        (relay,) = relays
+        assert (relay.bind_host, relay.ports) == (FakeNetworks.BRIDGE_ADDRESS, [5432, 6000, 6001])
+        assert relay.started
+        assert relay.allowed_source == FakeNetworks.GATEWAY_CONTAINER_ADDRESS
+        gateway, _ = _run_kwargs(client)
+        config = GatewayConfig.from_json(gateway["environment"][CONFIG_ENV])
+        assert config.host_address == FakeNetworks.BRIDGE_ADDRESS
+    assert relay.stopped
+
+
+def test_no_relay_without_host_rules_or_on_docker_desktop(tmp_path, services, relays):
+    with SandboxSession(
+        _spec(), tmp_path, RecordingAgent(), replace(services, host_access=HostAccess.BRIDGE_RELAY)
+    ):
         pass
-    (proxy,) = proxies.created
-    assert (proxy.network, proxy.project_root) == (_spec().network, tmp_path)
-    assert agent.prepared_with[0]["HTTP_PROXY"].endswith(f":{FakeProxy.PORT}")
+    with SandboxSession(_spec(allow=["host:5432"]), tmp_path, RecordingAgent(), services):
+        pass
+    assert relays == []
+
+
+def test_relay_is_stopped_when_gateway_fails(tmp_path, client, services, relays):
+    def failing_run(image, **kwargs):
+        raise docker.errors.APIError("boom")
+
+    client.containers.run = failing_run
+    services = replace(services, host_access=HostAccess.BRIDGE_RELAY)
+    with pytest.raises(SandboxError):
+        SandboxSession(
+            _spec(allow=["host:5432"]), tmp_path, RecordingAgent(), services
+        ).__enter__()
+    assert relays[0].stopped
+
+
+def test_paths(tmp_path: Path):
+    assert GatewayManager.gateway_name(_spec(), tmp_path).startswith("bulbi-gw-demo-")
