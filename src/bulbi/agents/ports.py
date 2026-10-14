@@ -43,8 +43,12 @@ class ContainerHandle(ABC):
     """A started box, seen from inside: run commands as the sandbox user and write its files."""
 
     @abstractmethod
-    def exec(self, argv: Sequence[str]) -> ExecResult:
-        """Run ``argv`` and wait for it to finish."""
+    def exec(self, argv: Sequence[str], *, as_root: bool = False) -> ExecResult:
+        """Run ``argv`` and wait for it to finish.
+
+        ``as_root`` runs it as root, which in the box still has no capabilities: it is
+        only for touching files root owns (e.g. a fresh volume's mount point).
+        """
 
     @abstractmethod
     def write_file(self, path: str, content: str, *, mode: int = DEFAULT_FILE_MODE) -> None:

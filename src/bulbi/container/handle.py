@@ -18,6 +18,7 @@ from bulbi.errors import SandboxError
 
 Clock = Callable[[], float]
 _TEMP_SUFFIX = ".bulbi-tmp"
+ROOT_USER = "root"
 
 
 class DockerContainerHandle(ContainerHandle):
@@ -42,9 +43,10 @@ class DockerContainerHandle(ContainerHandle):
         self._home = PurePosixPath(home)
         self._clock = clock
 
-    def exec(self, argv: Sequence[str]) -> ExecResult:
+    def exec(self, argv: Sequence[str], *, as_root: bool = False) -> ExecResult:
+        user = ROOT_USER if as_root else self._user
         with docker_errors(f"failed to run {argv[0]} in container"):
-            result = self._container.exec_run(list(argv), user=self._user)
+            result = self._container.exec_run(list(argv), user=user)
         output = result.output.decode() if result.output else ""
         return ExecResult(exit_code=result.exit_code, output=output)
 
