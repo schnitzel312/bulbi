@@ -10,12 +10,12 @@ from bulbi.agents import (
     AgentRegistry,
     ClaudeAgent,
     CodexAgent,
+    ExecResult,
     KeychainCredentialProvider,
     NoCredentialProvider,
     UnmanagedAgent,
 )
-from bulbi.container.execution import ExecResult
-from tests.fakes import FakeExecutor, StaticCredentials
+from tests.fakes import FakeContainerHandle, StaticCredentials
 
 HOME = "/home/bulbi"
 
@@ -63,18 +63,20 @@ def test_api_keys_from_host_env_skips_unset_and_empty():
 
 
 def test_default_prepare_container_does_nothing():
-    executor = FakeExecutor()
+    executor = FakeContainerHandle()
     CodexAgent().prepare_container(executor, {})
     assert executor.commands == []
 
 
 def test_claude_writes_settings_and_user_config(host_home: Path):
-    executor = FakeExecutor({("claude", "--version"): ExecResult(0, "2.1.0 (Claude Code)\n")})
+    executor = FakeContainerHandle(
+        {("claude", "--version"): ExecResult(0, "2.1.0 (Claude Code)\n")}
+    )
     agent = ClaudeAgent(credentials=StaticCredentials(None), host_home=host_home)
 
     agent.prepare_container(executor, {"ANTHROPIC_API_KEY": "sk"})
 
-    files = executor.written_files()
+    files = executor.files
     settings = json.loads(files[f"{HOME}/.claude/settings.json"])
     assert settings == {"theme": "dark", "skipDangerousModePermissionPrompt": True}
     config = json.loads(files[f"{HOME}/.claude.json"])
@@ -86,41 +88,41 @@ def test_claude_writes_settings_and_user_config(host_home: Path):
 
 def test_claude_skips_credentials_when_api_key_is_forwarded(host_home: Path):
     credentials = StaticCredentials('{"token": "t"}')
-    executor = FakeExecutor()
+    executor = FakeContainerHandle()
     ClaudeAgent(credentials=credentials, host_home=host_home).prepare_container(
         executor, {"ANTHROPIC_API_KEY": "sk"}
     )
     assert credentials.reads == 0
-    assert f"{HOME}/.claude/.credentials.json" not in executor.written_files()
+    assert f"{HOME}/.claude/.credentials.json" not in executor.files
 
 
 def test_claude_injects_credentials_with_private_mode(host_home: Path):
-    executor = FakeExecutor()
+    executor = FakeContainerHandle()
     ClaudeAgent(
         credentials=StaticCredentials('{"token": "t"}'), host_home=host_home
     ).prepare_container(executor, {})
     target = f"{HOME}/.claude/.credentials.json"
-    assert executor.written_files()[target] == '{"token": "t"}'
-    assert any(f"chmod 600 {target}" in script for script in executor.scripts)
+    assert executor.files[target] == '{"token": "t"}'
+    assert executor.modes[target] == 0o600
 
 
 def test_claude_version_falls_back_to_host_config(tmp_path: Path):
     (tmp_path / ".claude.json").write_text(json.dumps({"lastReleaseNotesSeen": "1.0.0"}))
-    executor = FakeExecutor({("claude", "--version"): ExecResult(1, "not found")})
+    executor = FakeContainerHandle({("claude", "--version"): ExecResult(1, "not found")})
     ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).prepare_container(
         executor, {}
     )
-    config = json.loads(executor.written_files()[f"{HOME}/.claude.json"])
+    config = json.loads(executor.files[f"{HOME}/.claude.json"])
     assert config["lastReleaseNotesSeen"] == "1.0.0"
 
 
 def test_claude_tolerates_missing_or_malformed_host_config(tmp_path: Path):
     (tmp_path / ".claude.json").write_text("{not json")
-    executor = FakeExecutor()
+    executor = FakeContainerHandle()
     ClaudeAgent(credentials=NoCredentialProvider(), host_home=tmp_path).prepare_container(
         executor, {}
     )
-    config = json.loads(executor.written_files()[f"{HOME}/.claude.json"])
+    config = json.loads(executor.files[f"{HOME}/.claude.json"])
     assert config["lastReleaseNotesSeen"] == "99.99.99"
 
 

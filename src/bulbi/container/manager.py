@@ -12,8 +12,9 @@ from typing import Any
 import docker.errors
 import docker.types
 
+from bulbi.agents.ports import ContainerHandle
 from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_BOX, DOCKER_LABEL_VALUE
-from bulbi.container.execution import ContainerExecutor, DockerContainerExecutor
+from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.mounts import BindMount
 from bulbi.errors import SandboxError
 from bulbi.spec import BulbiSpec, LimitsSpec
@@ -28,10 +29,10 @@ _BULBI_FILTER = {"label": f"{DOCKER_LABEL}={DOCKER_LABEL_VALUE}"}
 
 @dataclass(frozen=True)
 class RunningBox:
-    """A started box: its container ID and a way to run commands in it."""
+    """A started box: its container ID and a handle for working inside it."""
 
     id: str
-    executor: ContainerExecutor
+    handle: ContainerHandle
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ class BoxManager:
                 tty=True,
                 **self._resource_limits(spec.limits),
             )
-        return RunningBox(id=container.id, executor=DockerContainerExecutor(container))
+        return RunningBox(id=container.id, handle=DockerContainerHandle(container))
 
     def stop(self, container_id: str) -> None:
         """Stop and remove a container; a container that is already gone is fine."""

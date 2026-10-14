@@ -98,5 +98,5 @@ class SandboxSession:
             environment,
         )
         self._cleanup.callback(self._services.boxes.stop, box.id)
-        self._agent.prepare_container(box.executor, environment)
+        self._agent.prepare_container(box.handle, environment)
         self._box = box

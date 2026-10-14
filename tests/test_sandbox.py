@@ -4,9 +4,8 @@ from collections.abc import Mapping
 
 import pytest
 
-from bulbi.agents import Agent
+from bulbi.agents import Agent, ContainerHandle
 from bulbi.container.environment import EnvironmentBuilder
-from bulbi.container.execution import ContainerExecutor
 from bulbi.container.manager import BoxManager
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
@@ -25,7 +24,7 @@ class RecordingAgent(Agent):
         self.prepared_with: list[Mapping[str, str]] = []
         self._fail = fail
 
-    def prepare_container(self, container: ContainerExecutor, environment) -> None:
+    def prepare_container(self, container: ContainerHandle, environment) -> None:
         if self._fail:
             raise SandboxError("prepare failed")
         self.prepared_with.append(dict(environment))

@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from bulbi.container.execution import ContainerExecutor
+from bulbi.agents.ports import ContainerHandle
 
 
 class Agent(ABC):
@@ -46,12 +46,12 @@ class Agent(ABC):
         return {var: host_env[var] for var in self.api_key_vars if host_env.get(var)}
 
     def prepare_container(  # noqa: B027 - optional hook, intentionally a no-op by default
-        self, container: ContainerExecutor, environment: Mapping[str, str]
+        self, container: ContainerHandle, environment: Mapping[str, str]
     ) -> None:
         """Hook run once the container is up, before the agent starts.
 
         Args:
-            container: Executes commands inside the freshly started container.
+            container: Runs commands and writes files inside the freshly started box.
             environment: The environment the container was started with.
         """
 

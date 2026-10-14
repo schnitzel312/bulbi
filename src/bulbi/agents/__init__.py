@@ -10,6 +10,7 @@ from bulbi.agents.credentials import (
     KeychainCredentialProvider,
     NoCredentialProvider,
 )
+from bulbi.agents.ports import ContainerHandle, ExecResult
 from bulbi.agents.registry import AgentRegistry
 
 __all__ = [
@@ -17,7 +18,9 @@ __all__ = [
     "AgentRegistry",
     "ClaudeAgent",
     "CodexAgent",
+    "ContainerHandle",
     "CredentialProvider",
+    "ExecResult",
     "KeychainCredentialProvider",
     "NoCredentialProvider",
     "UnmanagedAgent",

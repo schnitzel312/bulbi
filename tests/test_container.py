@@ -147,7 +147,7 @@ def test_start_replaces_stale_container():
 def test_started_box_executes_as_sandbox_user():
     client = FakeDocker()
     box = BoxManager(client).start(_spec(), Path("/p"), "img", [], {})
-    box.executor.exec(["true"])
+    box.handle.exec(["true"])
     container = client.containers.get(box.id)
     assert container.exec_calls == [(["true"], "bulbi")]
 

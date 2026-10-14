@@ -5,12 +5,9 @@ from __future__ import annotations
 import os
 import platform
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
 
+from bulbi.agents import Agent
 from bulbi.constants import MACOS_SYSTEM_NAME
-
-if TYPE_CHECKING:
-    from bulbi.agents import Agent
 
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 DOCKER_DESKTOP_HOST = "host.docker.internal"

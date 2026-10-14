@@ -2,40 +2,30 @@
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from collections.abc import Sequence
 
 import docker.errors
 
-from bulbi.agents import CredentialProvider
-from bulbi.container.execution import ContainerExecutor, ExecResult
+from bulbi.agents import ContainerHandle, CredentialProvider, ExecResult
 
 
-class FakeExecutor(ContainerExecutor):
-    """Records commands and simulates the files written through ``bash -c``."""
+class FakeContainerHandle(ContainerHandle):
+    """Records commands and keeps written files in memory."""
 
     def __init__(self, responses: dict[tuple[str, ...], ExecResult] | None = None) -> None:
         self.commands: list[list[str]] = []
+        self.files: dict[str, str] = {}
+        self.modes: dict[str, int] = {}
         self._responses = responses or {}
 
     def exec(self, argv: Sequence[str]) -> ExecResult:
         self.commands.append(list(argv))
         return self._responses.get(tuple(argv), ExecResult(exit_code=0, output=""))
 
-    @property
-    def scripts(self) -> list[str]:
-        return [cmd[2] for cmd in self.commands if cmd[:2] == ["bash", "-c"]]
-
-    def written_files(self) -> dict[str, str]:
-        """Map of path -> content for every ``echo CONTENT > PATH`` step."""
-        files = {}
-        for script in self.scripts:
-            for step in script.split(" && "):
-                tokens = shlex.split(step)
-                if tokens[0] == "echo":
-                    files[tokens[3]] = tokens[1]
-        return files
+    def write_file(self, path: str, content: str, *, mode: int = 0o644) -> None:
+        self.files[path] = content
+        self.modes[path] = mode
 
 
 class StaticCredentials(CredentialProvider):
@@ -65,12 +55,21 @@ class FakeContainer:
         self.status = "running"
         self.labels = labels or {}
         self.exec_calls: list[tuple[list[str], str]] = []
+        self.exec_responses: dict[tuple[str, ...], FakeExecRun] = {
+            ("id", "-u"): FakeExecRun(0, b"1000\n"),
+            ("id", "-g"): FakeExecRun(0, b"1000\n"),
+        }
+        self.archives: list[tuple[str, bytes]] = []
         self.stopped = False
         self.removed = False
 
     def exec_run(self, argv: list[str], user: str) -> FakeExecRun:
         self.exec_calls.append((argv, user))
-        return FakeExecRun()
+        return self.exec_responses.get(tuple(argv), FakeExecRun())
+
+    def put_archive(self, path: str, data: bytes) -> bool:
+        self.archives.append((path, data))
+        return True
 
     def stop(self, timeout: int) -> None:
         self.stopped = True

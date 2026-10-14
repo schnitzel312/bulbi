@@ -1,8 +1,20 @@
-"""Docker containers that host a box.
-
-Import from the submodules directly. This package deliberately re-exports nothing,
-because ``bulbi.agents`` depends on the low-level ``container.execution`` and
-``container.files`` modules while ``container.environment`` refers to agents.
-"""
+"""Docker containers that host a box."""
 
 from __future__ import annotations
+
+from bulbi.container.environment import EnvironmentBuilder
+from bulbi.container.handle import DockerContainerHandle
+from bulbi.container.manager import BoxInfo, BoxManager, RunningBox
+from bulbi.container.mounts import BindMount, MountPlanner
+from bulbi.container.terminal import TerminalExec
+
+__all__ = [
+    "BindMount",
+    "BoxInfo",
+    "BoxManager",
+    "DockerContainerHandle",
+    "EnvironmentBuilder",
+    "MountPlanner",
+    "RunningBox",
+    "TerminalExec",
+]

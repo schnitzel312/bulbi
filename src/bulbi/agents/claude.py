@@ -10,9 +10,8 @@ from typing import Any
 
 from bulbi.agents.base import Agent
 from bulbi.agents.credentials import CredentialProvider, KeychainCredentialProvider
+from bulbi.agents.ports import ContainerHandle
 from bulbi.constants import CONTAINER_HOME, CONTAINER_WORKSPACE
-from bulbi.container.execution import ContainerExecutor
-from bulbi.container.files import ContainerFileWriter
 
 API_KEY_VAR = "ANTHROPIC_API_KEY"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -20,7 +19,7 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 USER_CONFIG_FILE = ".claude.json"
 SETTINGS_FILE = ".claude/settings.json"
 CREDENTIALS_FILE = ".claude/.credentials.json"
-CREDENTIALS_FILE_MODE = "600"
+CREDENTIALS_FILE_MODE = 0o600
 
 # Large enough that Claude Code treats onboarding, tips and migrations as done.
 _SEEN_EVERYTHING_COUNT = 9999
@@ -68,16 +67,15 @@ class ClaudeAgent(Agent):
         self._host_home = host_home
 
     def prepare_container(
-        self, container: ContainerExecutor, environment: Mapping[str, str]
+        self, container: ContainerHandle, environment: Mapping[str, str]
     ) -> None:
-        files = ContainerFileWriter(container)
-        files.write(_in_container_home(SETTINGS_FILE), json.dumps(self._settings()))
-        files.write(
+        container.write_file(_in_container_home(SETTINGS_FILE), json.dumps(self._settings()))
+        container.write_file(
             _in_container_home(USER_CONFIG_FILE),
             json.dumps(self._user_config(self._installed_version(container))),
         )
         if API_KEY_VAR not in environment:
-            self._write_credentials(files)
+            self._write_credentials(container)
 
     def _settings(self) -> JsonObject:
         settings = self._read_host_json(SETTINGS_FILE)
@@ -103,16 +101,16 @@ class ClaudeAgent(Agent):
         return config
 
     @staticmethod
-    def _installed_version(container: ContainerExecutor) -> str | None:
+    def _installed_version(container: ContainerHandle) -> str | None:
         """Version of Claude Code in the image, so its release notes count as seen."""
         result = container.exec(["claude", "--version"])
         words = result.output.split()
         return words[0] if result.succeeded and words else None
 
-    def _write_credentials(self, files: ContainerFileWriter) -> None:
+    def _write_credentials(self, container: ContainerHandle) -> None:
         credentials = self._credentials.read()
         if credentials:
-            files.write(
+            container.write_file(
                 _in_container_home(CREDENTIALS_FILE), credentials, mode=CREDENTIALS_FILE_MODE
             )
 
