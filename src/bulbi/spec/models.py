@@ -108,7 +108,6 @@ class LimitsSpec:
     cpu: int = DEFAULT_CPU
     memory: str = DEFAULT_MEMORY
 
-    @property
     def memory_bytes(self) -> int:
         """``memory`` (e.g. ``4GB``, binary units) in bytes."""
         match = _MEMORY_PATTERN.match(self.memory.upper())

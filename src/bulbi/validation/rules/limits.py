@@ -18,6 +18,6 @@ class ResourceLimitsRule(ValidationRule):
                 f"limits.cpu must be a positive integer, got {spec.limits.cpu!r}"
             )
         try:
-            spec.limits.memory_bytes  # noqa: B018 - evaluated only to validate the format
+            spec.limits.memory_bytes()
         except SpecError as exc:
             yield ValidationIssue.error(f"limits.memory: {exc}")

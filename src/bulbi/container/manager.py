@@ -126,7 +126,7 @@ class BoxManager:
     def _resource_limits(limits: LimitsSpec) -> dict[str, int]:
         return {
             "nano_cpus": limits.cpu * _NANO_CPUS_PER_CPU,
-            "mem_limit": limits.memory_bytes,
+            "mem_limit": limits.memory_bytes(),
         }
 
     @staticmethod
