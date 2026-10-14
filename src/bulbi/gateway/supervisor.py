@@ -13,6 +13,7 @@ Standard-library only: it runs in the gateway image.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import json
 import logging
 import subprocess
@@ -34,6 +35,8 @@ logger = logging.getLogger(__name__)
 NFT_COMMAND = ("nft", "-f", "-")
 LEARNED = "learned"
 AUDIT = "audit"
+ACK = "ack"
+ACK_TIMEOUT_SECONDS = 2.0
 _UNKNOWN_PROTOCOL = "IP"
 
 CommandRunner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -54,14 +57,54 @@ class FirewallLoader:
 
 
 class PipeSink(ResolverSink):
-    """The resolver side of the pipe: one JSON message per line."""
+    """The resolver side of the pipes: one JSON message per line each way.
 
-    def __init__(self, stream: IO[str]) -> None:
+    :meth:`learned` blocks until the supervisor acknowledges that the addresses are in
+    the firewall, so the box never receives an answer before it can use it.
+    """
+
+    def __init__(
+        self, stream: IO[str], acks: IO[str], ack_timeout: float = ACK_TIMEOUT_SECONDS
+    ) -> None:
         self._stream = stream
         self._lock = threading.Lock()
+        self._ack_timeout = ack_timeout
+        self._pending: dict[int, threading.Event] = {}
+        self._ids = itertools.count(1)
+        self._closed = threading.Event()
+        threading.Thread(target=self._read_acks, args=(acks,), daemon=True).start()
 
     def learned(self, name: str, records: list[tuple[IPAddress, int]]) -> None:
-        self._send({"kind": LEARNED, "name": name, "records": [[str(a), t] for a, t in records]})
+        message_id = next(self._ids)
+        done = threading.Event()
+        self._pending[message_id] = done
+        try:
+            self._send(
+                {
+                    "kind": LEARNED,
+                    "id": message_id,
+                    "name": name,
+                    "records": [[str(a), t] for a, t in records],
+                }
+            )
+            if not self._closed.is_set() and not done.wait(self._ack_timeout):
+                logger.warning("supervisor did not confirm pins for %r in time", name)
+        finally:
+            self._pending.pop(message_id, None)
+
+    def _read_acks(self, acks: IO[str]) -> None:
+        try:
+            for line in acks:
+                try:
+                    event = self._pending.get(int(json.loads(line)[ACK]))
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if event is not None:
+                    event.set()
+        finally:
+            self._closed.set()
+            for event in list(self._pending.values()):
+                event.set()
 
     def audit(self, entry: LogEntry) -> None:
         self._send({"kind": AUDIT, "entry": asdict(entry)})
@@ -94,20 +137,32 @@ class Supervisor:
 
     # ---- resolver reports ----------------------------------------------------------
 
-    def consume(self, lines: Iterable[str]) -> None:
-        """Handle every message from the resolver pipe until it closes."""
+    def consume(self, lines: Iterable[str], acks: IO[str] | None = None) -> None:
+        """Handle every message from the resolver pipe until it closes, acknowledging pins."""
         for line in lines:
-            self.handle_message(line)
+            message_id = self.handle_message(line)
+            if message_id is not None and acks is not None:
+                acks.write(json.dumps({ACK: message_id}) + "\n")
+                acks.flush()
 
-    def handle_message(self, line: str) -> None:
+    def handle_message(self, line: str) -> int | None:
+        """Apply one resolver message; returns the id to acknowledge, if any."""
         try:
             message = json.loads(line)
-            if message["kind"] == LEARNED:
-                self.learned(str(message["name"]), message["records"])
-            elif message["kind"] == AUDIT:
+            if message["kind"] == AUDIT:
                 self._audit.write(LogEntry.from_mapping(message["entry"]))
-        except (ValueError, KeyError, TypeError) as exc:
+                return None
+            if message["kind"] == LEARNED:
+                message_id = message.get("id")
+                try:
+                    self.learned(str(message["name"]), message["records"])
+                finally:
+                    # Always acknowledge, even a rejected report, so the resolver never stalls.
+                    ack = int(message_id) if message_id is not None else None
+                return ack
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
             logger.warning("ignoring malformed resolver message: %s", exc)
+        return None
 
     def learned(self, name: str, records: Iterable[Iterable[Any]]) -> None:
         """Pin (or block) the vetted answers of ``name``, re-checked against the policy."""

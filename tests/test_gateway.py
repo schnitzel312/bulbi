@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import os
 import socket
 import struct
 import threading
@@ -21,7 +22,7 @@ from bulbi.gateway.dns import (
     encode_name,
 )
 from bulbi.gateway.firewall import AddressEntry, FirewallContext, LogTag, NftablesBackend, PinKind
-from bulbi.gateway.nflog import bind_messages, parse_datagram
+from bulbi.gateway.nflog import ConnectionAttempt, bind_messages, parse_datagram
 from bulbi.gateway.policy import (
     HOST_NAME,
     Action,
@@ -49,6 +50,7 @@ from bulbi.gateway.rules import (
     Protocol,
     RuleParser,
 )
+from bulbi.gateway.supervisor import PipeSink, Supervisor
 
 TCP, UDP = Protocol.TCP, Protocol.UDP
 ip = ipaddress.ip_address
@@ -749,3 +751,95 @@ def test_relay_listens_only_on_declared_ports(echo_port):
             socket.create_connection(("127.0.0.1", free_port), timeout=2)
     finally:
         relay.stop()
+
+
+# ---- Supervisor / resolver pipe --------------------------------------------------------
+
+
+class _RecordingLoader:
+    def __init__(self) -> None:
+        self.scripts: list[str] = []
+
+    def load(self, script: str) -> None:
+        self.scripts.append(script)
+
+
+def _supervisor(m: PolicyMatcher, tmp_path: Path, loader=None) -> Supervisor:
+    return Supervisor(
+        m.policy,
+        m,
+        NftablesBackend(),
+        loader or _RecordingLoader(),
+        AuditLogWriter(tmp_path / "proxy.log"),
+        clock=lambda: "T",
+    )
+
+
+def test_learned_answers_are_pinned_before_the_resolver_replies(tmp_path):
+    """The DNS answer must not reach the box before its addresses are pinned."""
+    m = matcher(allow=["pypi.org"])
+    loader = _RecordingLoader()
+    supervisor = _supervisor(m, tmp_path, loader)
+    to_parent_r, to_parent_w = os.pipe()
+    to_child_r, to_child_w = os.pipe()
+    sink = PipeSink(os.fdopen(to_parent_w, "w"), os.fdopen(to_child_r))
+    parent_in, parent_out = os.fdopen(to_parent_r), os.fdopen(to_child_w, "w")
+    threading.Thread(target=supervisor.consume, args=(parent_in, parent_out), daemon=True).start()
+
+    sink.learned("pypi.org", [(ip("151.101.0.223"), 60)])
+
+    assert loader.scripts and "151.101.0.223 . tcp . 0-65535" in loader.scripts[0]
+
+
+def test_learned_does_not_hang_when_the_supervisor_is_gone(tmp_path):
+    to_parent_r, to_parent_w = os.pipe()
+    to_child_r, to_child_w = os.pipe()
+    os.close(to_child_w)  # the supervisor died
+    sink = PipeSink(os.fdopen(to_parent_w, "w"), os.fdopen(to_child_r), ack_timeout=0.2)
+    sink.learned("pypi.org", [(ip("151.101.0.223"), 60)])  # returns instead of blocking
+    os.close(to_parent_r)
+
+
+def test_supervisor_ignores_reports_for_denied_names_and_protected_addresses(tmp_path):
+    m = matcher(allow=["pypi.org"])
+    loader = _RecordingLoader()
+    supervisor = _supervisor(m, tmp_path, loader)
+    supervisor.learned("evil.test", [["1.2.3.4", 60]])
+    supervisor.learned("pypi.org", [["127.0.0.1", 60]])
+    assert all(not script.strip() for script in loader.scripts)
+
+
+def test_supervisor_survives_malformed_messages(tmp_path):
+    supervisor = _supervisor(matcher(allow=["pypi.org"]), tmp_path)
+    for line in [
+        "",
+        "{",
+        "[]",
+        '{"kind": "learned"}',
+        '{"kind": "learned", "name": "pypi.org", "records": [["nope", 1]]}',
+    ]:
+        supervisor.handle_message(line)
+
+
+def test_connection_attempts_are_audited_with_name_and_rule(tmp_path):
+    m = matcher(allow=["pypi.org", "10.0.0.0/24:5432"])
+    supervisor = _supervisor(m, tmp_path)
+    supervisor.learned("pypi.org", [["151.101.0.223", 60]])
+    supervisor.record_attempt(
+        ConnectionAttempt(
+            LogTag(Action.ALLOW, Reason.ALLOWED_BY_DNS), ip("151.101.0.223"), 443, TCP
+        )
+    )
+    supervisor.record_attempt(
+        ConnectionAttempt(
+            LogTag(Action.ALLOW, Reason.ALLOWED_BY_RULE, 1), ip("10.0.0.5"), 5432, TCP
+        )
+    )
+    first, second = AuditLogReader(tmp_path / "proxy.log").entries()
+    assert (first.domain, first.method, first.url, first.reason) == (
+        "pypi.org",
+        "TCP",
+        "151.101.0.223:443",
+        "allowed_by_dns",
+    )
+    assert (second.domain, second.rule, second.port) == ("10.0.0.5", "10.0.0.0/24:5432", 5432)

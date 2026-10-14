@@ -72,12 +72,13 @@ def _run_resolver(
     matcher: PolicyMatcher,
     sockets: tuple[socket.socket, socket.socket],
     pipe_fd: int,
+    ack_fd: int,
 ) -> None:
     """Child process: drop privileges for good, then serve DNS forever."""
     os.setgroups([])
     os.setgid(config.resolver_uid)
     os.setuid(config.resolver_uid)
-    sink = PipeSink(os.fdopen(pipe_fd, "w"))
+    sink = PipeSink(os.fdopen(pipe_fd, "w"), os.fdopen(ack_fd))
     resolver = Resolver(matcher, DockerDnsUpstream(), sink)
     try:
         DnsServer(resolver, *sockets).serve_forever()
@@ -102,20 +103,23 @@ def main() -> int:
     logger.info("ruleset loaded (%d rules, host %s)", len(policy.rules), list(map(str, hosts)))
 
     sockets = _bind_resolver_sockets()
-    read_fd, write_fd = os.pipe()
+    read_fd, write_fd = os.pipe()  # resolver -> supervisor
+    ack_read_fd, ack_write_fd = os.pipe()  # supervisor -> resolver
     child = os.fork()
     if child == 0:
         os.close(read_fd)
-        _run_resolver(config, matcher, sockets, write_fd)
+        os.close(ack_write_fd)
+        _run_resolver(config, matcher, sockets, write_fd, ack_read_fd)
     os.close(write_fd)
+    os.close(ack_read_fd)
     for sock in sockets:
         sock.close()
 
     audit = AuditLogWriter(Path(config.log_file), config.log_owner)
     supervisor = Supervisor(policy, matcher, backend, loader, audit)
     threading.Thread(target=_follow_firewall_log, args=(supervisor,), daemon=True).start()
-    pipe = os.fdopen(read_fd)
-    threading.Thread(target=supervisor.consume, args=(pipe,), daemon=True).start()
+    reports, acks = os.fdopen(read_fd), os.fdopen(ack_write_fd, "w")
+    threading.Thread(target=supervisor.consume, args=(reports, acks), daemon=True).start()
     Path(READY_FILE).write_text("ready\n")
     logger.info("ready")
     _, status = os.waitpid(child, 0)
