@@ -10,6 +10,7 @@ volume it created.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterator
 from contextlib import suppress
@@ -69,22 +70,28 @@ def _remove_box(client, repo: Path) -> None:
         volume.remove(force=True)
 
 
-@pytest.fixture(params=["guarded", "isolated"])
-def project(request, docker_client, tmp_path: Path) -> Iterator[Project]:
+def _make_project(client, tmp_path: Path, mode: str, prepare=None) -> Iterator[Project]:
     repo = make_repo(tmp_path / "code" / "app")
-    write_spec(
-        repo,
-        box_name("gitsafety"),
-        allow=["pypi.org"],
-        extra=f'[git]\nmode = "{request.param}"\n',
-    )
+    if prepare is not None:
+        prepare(repo)
+    write_spec(repo, box_name("gitsafety"), allow=["pypi.org"], extra=f'[git]\nmode = "{mode}"\n')
     git(repo, "add", "bulbi.toml")
     git(repo, "commit", "-q", "-m", "spec")
     worktree = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
-    yield Project(request.param, repo, worktree, tmp_path)
+    yield Project(mode, repo, worktree, tmp_path)
     # Whatever is left is removed by the session fixture.
     with suppress(docker.errors.DockerException):
-        _remove_box(docker_client, repo)
+        _remove_box(client, repo)
+
+
+@pytest.fixture(params=["guarded", "isolated"])
+def project(request, docker_client, tmp_path: Path) -> Iterator[Project]:
+    yield from _make_project(docker_client, tmp_path, request.param)
+
+
+@pytest.fixture
+def isolated(docker_client, tmp_path: Path) -> Iterator[Project]:
+    yield from _make_project(docker_client, tmp_path, "isolated")
 
 
 def test_vector_a_repointing_the_worktree_git_file_is_refused(project):
@@ -170,3 +177,85 @@ def test_isolated_box_commits_come_back_with_bulbi_pull(project):
     assert "bulbi/wt" in pulled.stdout
     assert git(project.repo, "log", "-1", "--format=%s", "bulbi/wt") == "agent work"
     assert git(project.repo, "log", "-1", "--format=%s", "wt") == "spec"
+
+
+# ---- isolated mode only (spec §3.4) --------------------------------------------------------
+
+
+def test_isolated_box_never_sees_host_config_hooks_or_refs(isolated):
+    git_dir = isolated.repo / ".git"
+    git(isolated.repo, "config", "bulbitest.canary", "host-config")
+    hook = git_dir / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\n")
+    hook.chmod(0o755)
+    git(isolated.repo, "update-ref", "refs/bulbitest/hidden", "HEAD")
+    script = (
+        f"! git config bulbitest.canary && test ! -e {hook} && "
+        f"! git show-ref --verify -q refs/bulbitest/hidden && "
+        f"test ! -e {git_dir}/logs && git log -1 --format=%s main"
+    )
+    result = isolated.in_box(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().endswith("spec"), "history is read through the alternates"
+
+
+def test_isolated_box_cannot_write_host_objects(isolated):
+    result = isolated.in_box("touch /bulbi/host-objects/planted")
+    assert result.returncode != 0 and "Read-only" in result.stdout + result.stderr
+    assert not (isolated.repo / ".git" / "objects" / "planted").exists()
+
+
+def _large_history(repo: Path) -> None:
+    for index in range(40):
+        (repo / f"blob{index}.bin").write_bytes(os.urandom(256 * 1024))
+        git(repo, "add", f"blob{index}.bin")
+        git(repo, "commit", "-q", "-m", f"blob {index}")
+
+
+@pytest.fixture
+def large(docker_client, tmp_path: Path) -> Iterator[Project]:
+    yield from _make_project(docker_client, tmp_path, "isolated", _large_history)
+
+
+def test_isolated_box_repo_stays_small_whatever_the_history(large):
+    host_kib = int(subprocess.run(
+        ["du", "-sk", str(large.repo / ".git" / "objects")], capture_output=True, text=True,
+        check=True,
+    ).stdout.split()[0])  # fmt: skip
+    result = large.in_box(
+        f"git log --oneline | wc -l && du -sk --exclude=index {large.repo}/.git | cut -f1"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    commits, box_kib = (int(line) for line in result.stdout.split()[-2:])
+    assert commits >= 40 and host_kib > 9000
+    assert box_kib < 1024, f"box repo uses {box_kib} KiB for a {host_kib} KiB history"
+
+
+def _doomed_branch(repo: Path) -> None:
+    """A host branch with a commit only it reaches; the box repo will rely on it."""
+    git(repo, "checkout", "-q", "-b", "doomed")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "doomed")
+    git(repo, "checkout", "-q", "main")
+
+
+@pytest.fixture
+def doomed(docker_client, tmp_path: Path) -> Iterator[Project]:
+    yield from _make_project(docker_client, tmp_path, "isolated", _doomed_branch)
+
+
+def test_pruned_host_history_is_refused_then_rebuilt_by_restart(doomed):
+    first = doomed.in_box("git log -1 --format=%s doomed")
+    assert first.returncode == 0 and "doomed" in first.stdout, first.stdout + first.stderr
+    git(doomed.repo, "branch", "-q", "-D", "doomed")
+    git(doomed.repo, "reflog", "expire", "--expire=now", "--all")
+    git(doomed.repo, "gc", "-q", "--prune=now")
+
+    refused = doomed.in_box("true")
+    assert refused.returncode == 1
+    assert "host history changed under the box" in refused.stdout + refused.stderr
+
+    restart = bulbi(doomed.repo, "restart", "--yes")
+    assert restart.returncode == 0, restart.stdout + restart.stderr
+    rebuilt = doomed.in_box(f"git status --short && ls -a {doomed.repo}/.git")
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    assert ".bulbi-broken-" in rebuilt.stdout, "the broken repo is kept, not deleted"
