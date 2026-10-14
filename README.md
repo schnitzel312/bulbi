@@ -161,7 +161,7 @@ NPM_TOKEN    = { from = "command", source = "op read op://dev/npm/token" }
 ### Mounts
 
 - **Path inside the box:** each project directory is mounted at the same path inside the box as on your machine.
-- **Read-only parts:** `bulbi.toml` and the repository's existing git metadata (`.git/hooks`, `.git/config`, and the pointer files that link worktrees) are always read-only inside the box. The agent can't loosen its own sandbox or plant git hooks there. See [Known gap: git on the host](#known-gap-git-on-the-host) for what isn't covered yet.
+- **Read-only parts:** `bulbi.toml` and the repository's existing git metadata (`.git/hooks`, `.git/config`, and the pointer files that link worktrees) are always read-only inside the box. The agent can't loosen its own sandbox or plant git hooks there.
 - **Excludes** hide matching files that exist when the box starts.
 - **Checks:** `bulbi check` refuses to mount a Docker socket, and warns about mounting `/` or your home directory.
 
@@ -226,23 +226,7 @@ Bulbi assumes the agent may be hostile, for example through prompt injection. **
 **It does not protect against:**
 - **Exfiltration to destinations you allow.** If `github.com` is allowed, the agent can push there.
 - **Shared CDN addresses.** Another site served from the same IP as an allowed domain is reachable.
-- **Running git on the host on git metadata the agent created.** See below.
 - **Kernel or Docker escapes,** or anyone who already has access to your Docker socket.
-
-### Known gap: git on the host
-
-When **you** run `git` on your machine, git reads the repository's configuration, and some settings make git run commands (`core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, filters, `!` aliases…). Bulbi makes the repository's existing git metadata read-only inside the box. Docker can only protect files that exist when the box starts, though. So an agent can still **create new git metadata** during a session and have it run commands on your machine the next time you run `git` there. Two ways:
-
-- a new nested repository, e.g. `src/.git`, pointing at a config the agent wrote;
-- a worktree the agent creates inside the box.
-
-**Until this is closed:**
-- **Don't run `git` on the host inside directories the agent created** while its sessions are live. Run git for the project inside the box instead (`bulbi shell`).
-- **Review new `.git` files or folders before using them on the host:** `find . -name .git -newer bulbi.toml`.
-
-**A fix is in progress:**
-- **Default "guarded" mode:** Bulbi scans for new git metadata and dangerous settings after each session and before each `bulbi run`, quarantines what it finds (it can be restored), and reports it.
-- **Opt-in "isolated" mode** (`[git] mode = "isolated"`): the agent commits into its own clone inside the box, and you fetch its work with `bulbi pull`. Your real `.git` is then never writable from the box.
 
 The design is documented in [`docs/specs/sandbox-isolation.md`](docs/specs/sandbox-isolation.md). The test suite includes a real-Docker escape suite that tries to break out in each of these ways. It runs on macOS (Docker Desktop); Linux, especially the `host:` relay, is less tested.
 
