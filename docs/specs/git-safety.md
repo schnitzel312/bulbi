@@ -1,6 +1,6 @@
 # Spec: Git safety: stop agents from planting code that runs on the host via git
 
-Status: approved by the user (option 1 now, option 3 as opt-in)
+Status: approved by the user (option 1 now, option 3 as opt-in; v2: isolated mode uses read-only alternates + bundles, no repo copy)
 Builds on `docs/specs/sandbox-isolation.md` (§3.6, §9). Read that first.
 
 ## 1. Threat
@@ -55,15 +55,42 @@ Between the agent writing a file and the next scan (session end or the next atta
 - for a full guarantee, use mode B.
 
 ## 3. Mode B: `isolated` (opt-in, `[git] mode = "isolated"`)
-The agent never has write access to any host git metadata.
-- **The box gets its own clone:**
-  - the repo is cloned into a named volume `bulbi-git-<project>` at box creation (`git clone --no-local`, or a fetch from the host repo through a read-only mount);
-  - the host's `.git` dirs and files are **not** mounted, so they're absent in the box;
-  - working-tree files remain bind-mounted read-write as usual;
-  - in the box, `GIT_DIR` / `.git` points at the volume clone.
-- **Getting the agent's commits back:** `bulbi pull [--branch <b>]` runs on the host and does `git fetch` from the box clone, using host git with `-c protocol.file.allow=always`. Before fetching, it scans the box clone's config with the §2.2 exec-key check, because local-transport upload-pack reads the source repo's config; on findings it refuses. It fetches into `refs/remotes/bulbi/*`, never touching the user's branches.
-- **Worktrees in this mode:** each mounted worktree gets its own linked worktree inside the box clone, at the same host path.
-- **Tests:** in a docker test, vectors A, B and C produce nothing on the host. A commit made in the box appears after `bulbi pull` as `bulbi/<branch>`.
+The agent never has write access to, or even sight of, host git config, hooks or refs. **Minimal footprint:** history is shared read-only, never copied.
+
+### 3.1 Box-owned repository, sharing history via alternates
+- **Box repo:** a small named volume `bulbi-git-<project-hash>` holds the box's own git dir: refs, config, index, worktree admin dirs, and only the **new** objects the agent creates.
+- **Shared history:** the host's `<common-dir>/objects` is bind-mounted **read-only** (and only `objects/`, never `config`, `hooks`, `refs`, `logs` or `info`). The box repo lists it in `objects/info/alternates`, so all existing history is read in place with **zero copy**.
+- **Where the box repo appears:**
+  - The volume is mounted at `<main checkout>/.git` inside the box, hiding the host's `.git` there.
+  - Each mounted worktree's `.git` file is replaced by a Bulbi-generated file, overlaid read-only, pointing at the matching admin dir in the volume.
+  - The working-tree files themselves stay bind-mounted read-write as usual.
+- **Creation:** the box repo is created by Bulbi, not the agent, at box creation:
+  1. `git init`, then a Bulbi-written config (no exec-capable keys).
+  2. Refs: Bulbi reads them on the host (`git for-each-ref`) and writes them as `packed-refs` via `put_archive`. No fetch from the host repo, and the host config is never exposed (remote URLs can contain tokens).
+  3. The index is rebuilt in the box (`git read-tree` + a refresh). It costs one read of the working tree, no copy.
+- **`gc.auto = 0`** in the box repo. The box may only ever drop its own objects.
+- **Footprint:** a few MB (refs + index + new commits), regardless of repo size. `bulbi check` shows it.
+
+### 3.2 Getting commits back: `bulbi pull [--branch <b>]`
+1. Inside the box, Bulbi runs `git bundle create - <box branches>` and streams it to the host through `docker exec`. Only objects missing from the host are included, thanks to `--not <host tips>`.
+2. On the host: `git bundle verify`, then fetch from the bundle into `refs/remotes/bulbi/*`, never touching the user's branches.
+
+A bundle is pure object data: host git never opens the box repo, so nothing the agent wrote (config, hooks, pointers) can run on the host.
+
+### 3.3 Keeping alternates valid
+If the host prunes objects the box relies on (`git gc --prune`, history rewrite), the box repo breaks.
+- **Detection:** on every attach, Bulbi verifies that the box's branch tips and their parents resolve (cheap `cat-file -e` checks).
+- **When broken:** Bulbi refuses with "host history changed under the box; run `bulbi pull` to save the agent's commits, then `bulbi restart` to rebuild". Rebuilding is cheap since nothing was copied.
+
+### 3.4 Tests
+- **Docker:**
+  - vectors A, B and C produce no marker on the host;
+  - the host's `config`/`hooks`/`refs` aren't visible in the box;
+  - writes to the host objects mount fail (read-only);
+  - a commit in the box comes back via `bulbi pull` as `bulbi/<branch>`;
+  - volume size stays small on a test repo with large history;
+  - pruning on the host leads to a clean refusal, then the restart path.
+- **Unit:** alternates/config generation, the refs export, bundle pull with a fake runner, the broken-alternates check.
 
 ## 4. Design constraints
 - **Follow the repo's conventions:** CLAUDE.md, SOLID, ABCs at extension points. For example:
