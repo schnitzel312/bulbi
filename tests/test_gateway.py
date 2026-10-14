@@ -1,10 +1,27 @@
 """Tests for the gateway's pure parts: rule parsing, matching, protected ranges."""
 
 import ipaddress
+import json
+import socket
+import struct
+import threading
+from pathlib import Path
 
 import pytest
 
-from bulbi.errors import RuleError
+from bulbi.errors import AuditLogError, RuleError
+from bulbi.gateway.audit import AuditLogReader, AuditLogWriter, LogEntry
+from bulbi.gateway.dns import (
+    DnsFormatError,
+    DnsMessage,
+    Question,
+    RecordType,
+    ResourceRecord,
+    ResponseCode,
+    encode_name,
+)
+from bulbi.gateway.firewall import AddressEntry, FirewallContext, LogTag, NftablesBackend, PinKind
+from bulbi.gateway.nflog import bind_messages, parse_datagram
 from bulbi.gateway.policy import (
     HOST_NAME,
     Action,
@@ -13,6 +30,16 @@ from bulbi.gateway.policy import (
     Reason,
 )
 from bulbi.gateway.protected import is_protected, overlaps_protected
+from bulbi.gateway.relay import HostRelay
+from bulbi.gateway.resolver import (
+    DnsServer,
+    Resolver,
+    ResolverSink,
+    Upstream,
+    UpstreamError,
+    address_entries,
+    read_tcp_message,
+)
 from bulbi.gateway.rules import (
     ALL_PROTOCOLS,
     AddressRule,
@@ -299,3 +326,426 @@ def test_overlaps_protected():
 def test_port_range_contains():
     assert 5 in PortRange(1, 10)
     assert "5" not in PortRange(1, 10)
+
+
+# ---- Firewall rendering (golden files) -----------------------------------------------
+
+GOLDEN = Path(__file__).parent / "golden"
+GOLDEN_CASES = {
+    "whitelist": (
+        "deny",
+        ["pypi.org", "*.github.com", "host:5432", "1.1.1.1:53/udp", "10.20.0.0/16",
+         "[2001:db8::1]:443/tcp"],
+        ["gist.github.com", "10.20.5.0/24"],
+    ),
+    "blacklist": ("allow", [], ["example.com", "*.telemetry.example", "203.0.113.0/24:25"]),
+    "mixed": (
+        "deny",
+        ["broker.cloudamqp.com:5671", "host:15672,5672", "192.168.1.20:6379", "8.8.8.0/24:53,853"],
+        ["8.8.8.8:853"],
+    ),
+}  # fmt: skip
+CONTEXT = FirewallContext(resolver_uid=999, host_addresses=(ip("192.168.65.254"),))
+
+
+@pytest.mark.parametrize("case", sorted(GOLDEN_CASES))
+def test_nftables_ruleset_matches_golden_file(case):
+    default, allow, deny = GOLDEN_CASES[case]
+    rendered = NftablesBackend().render(NetworkPolicy.parse(default, allow, deny), CONTEXT)
+    assert rendered == (GOLDEN / f"{case}.nft").read_text()
+
+
+def test_address_rules_are_ordered_like_the_matcher():
+    rendered = NftablesBackend().render(
+        NetworkPolicy.parse("deny", ["10.20.0.0/16"], ["10.20.5.0/24"]), CONTEXT
+    )
+    assert rendered.index("10.20.5.0/24") < rendered.index("10.20.0.0/16")
+
+
+def test_host_rule_without_known_host_address_is_inactive():
+    context = FirewallContext(resolver_uid=999)
+    rendered = NftablesBackend().render(NetworkPolicy.parse("deny", ["host:5432"]), context)
+    assert "# 'host:5432': no host address known, rule inactive" in rendered
+    assert "dport { 5432 }" not in rendered
+
+
+def test_render_entries_adds_pins_with_minimum_timeout():
+    coverage = matcher(allow=["broker.example:5671/tcp"]).name_coverage("broker.example")
+    segments = tuple(s for s in coverage.segments if s.decision.allowed)
+    script = NftablesBackend().render_entries(
+        [
+            AddressEntry(ip("3.3.3.3"), segments, ttl=30),
+            AddressEntry(ip("2606:4700::1"), segments, ttl=900),
+            AddressEntry(ip("4.4.4.4"), segments, ttl=60, kind=PinKind.DENY),
+        ]
+    )
+    assert script.splitlines() == [
+        "add element inet bulbi pin4 { 3.3.3.3 . tcp . 5671 timeout 300s }",
+        "add element inet bulbi pin6 { 2606:4700::1 . tcp . 5671 timeout 900s }",
+        "add element inet bulbi block4 { 4.4.4.4 . tcp . 5671 timeout 300s }",
+    ]
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        "bulbi",
+        "bulbi|allow|nope|-",
+        "bulbi|maybe|allowed_by_rule|1",
+        "x|allow|allowed_by_rule|1",
+        "bulbi|allow|allowed_by_rule|one",
+        "bulbi|allow|allowed_by_rule|1|extra",
+    ],
+)
+def test_log_tag_decode_rejects_garbage(prefix):
+    assert LogTag.decode(prefix) is None
+
+
+def test_log_tag_round_trip():
+    tag = LogTag(Action.DENY, Reason.DENIED_BY_RULE, 7)
+    assert LogTag.decode(tag.encode() + "\0") == tag
+
+
+# ---- DNS codec ---------------------------------------------------------------------
+
+
+def _query(name: str, qtype: int = RecordType.A, ident: int = 0x1234) -> bytes:
+    return DnsMessage(ident, 0x0100, (Question(name, qtype),)).encode()
+
+
+def _response(query: bytes, *records: ResourceRecord) -> bytes:
+    return DnsMessage.parse(query).reply(ResponseCode.NOERROR, records).encode()
+
+
+def test_dns_round_trip():
+    query = _query("PyPI.org")
+    message = DnsMessage.parse(query)
+    assert (message.id, message.questions[0].name, message.is_response) == (
+        0x1234,
+        "PyPI.org",
+        False,
+    )
+    assert DnsMessage.parse(message.encode()) == message
+
+
+def test_dns_parses_compressed_names_and_cname_rdata():
+    # Hand-built response: question pypi.org A; answer "pypi.org CNAME cdn.pypi.org" and
+    # "cdn.pypi.org A 151.101.0.223", both using compression pointers.
+    header = bytes.fromhex("abcd 8180 0001 0002 0000 0000")
+    question = b"\x04pypi\x03org\x00" + b"\x00\x01\x00\x01"  # name at offset 12
+    cname = (
+        b"\xc0\x0c" + b"\x00\x05\x00\x01" + b"\x00\x00\x00\x3c" + b"\x00\x06" + b"\x03cdn\xc0\x0c"
+    )
+    cname_target = 12 + len(question) + 12  # offset of "\x03cdn" inside the CNAME RDATA
+    a_record = (
+        bytes([0xC0, cname_target]) + b"\x00\x01\x00\x01" + b"\x00\x00\x01\x2c" + b"\x00\x04"
+        + bytes([151, 101, 0, 223])
+    )  # fmt: skip
+    message = DnsMessage.parse(header + question + cname + a_record)
+    assert [r.name for r in message.answers] == ["pypi.org", "cdn.pypi.org"]
+    assert message.answers[0].rdata == encode_name("cdn.pypi.org")
+    assert message.answers[1].address == ip("151.101.0.223")
+    assert DnsMessage.parse(message.encode()).answers == message.answers
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"\x00" * 5,
+        bytes.fromhex("0001 0100 0001 0000 0000 0000") + b"\x05ab",
+        bytes.fromhex("0001 0100 0001 0000 0000 0000") + b"\xc0\x0c",
+        bytes.fromhex("0001 8180 0000 0001 0000 0000")
+        + b"\x00\x00\x01\x00\x01\x00\x00\x00\x01\x00\x10ab",
+    ],
+)
+def test_malformed_dns_raises_format_error(data):
+    with pytest.raises(DnsFormatError):
+        DnsMessage.parse(data)
+
+
+# ---- Resolver ----------------------------------------------------------------------
+
+
+class FakeUpstream(Upstream):
+    def __init__(self, answers: dict[str, list[str]] | None = None, fail: bool = False) -> None:
+        self.answers = answers or {}
+        self.queries: list[str] = []
+        self.fail = fail
+
+    def query(self, payload: bytes) -> bytes:
+        name = DnsMessage.parse(payload).questions[0].name.lower()
+        self.queries.append(name)
+        if self.fail:
+            raise UpstreamError("timeout")
+        records = [
+            ResourceRecord.for_address(name, ip(a), 120) for a in self.answers.get(name, [])
+        ]
+        return _response(payload, *records)
+
+
+class RecordingSink(ResolverSink):
+    def __init__(self) -> None:
+        self.learned_records: list[tuple[str, list[tuple[object, int]]]] = []
+        self.entries: list[LogEntry] = []
+
+    def learned(self, name, records):
+        self.learned_records.append((name, records))
+
+    def audit(self, entry):
+        self.entries.append(entry)
+
+
+def _resolver(m: PolicyMatcher, upstream: Upstream) -> tuple[Resolver, RecordingSink]:
+    sink = RecordingSink()
+    return Resolver(m, upstream, sink, clock=lambda: "T"), sink
+
+
+def test_denied_name_never_reaches_upstream():
+    upstream = FakeUpstream({"gist.github.com": ["140.82.112.4"]})
+    resolver, sink = _resolver(matcher(allow=["*.github.com"], deny=["gist.github.com"]), upstream)
+    response = DnsMessage.parse(resolver.answer(_query("gist.github.com"), UDP))
+    assert response.rcode == ResponseCode.NXDOMAIN
+    assert upstream.queries == []
+    (entry,) = sink.entries
+    assert (entry.domain, entry.action, entry.method, entry.reason, entry.rule, entry.proto) == (
+        "gist.github.com", "deny", "DNS", "denied_by_rule", "gist.github.com", "udp",
+    )  # fmt: skip
+
+
+def test_unlisted_name_in_whitelist_is_nxdomain_without_upstream():
+    upstream = FakeUpstream()
+    resolver, sink = _resolver(matcher(allow=["pypi.org"]), upstream)
+    response = DnsMessage.parse(resolver.answer(_query("example.com"), UDP))
+    assert response.rcode == ResponseCode.NXDOMAIN
+    assert upstream.queries == []
+    assert sink.entries[0].reason == "denied_by_default"
+
+
+def test_allowed_name_answer_is_vetted_and_learned():
+    upstream = FakeUpstream({"localtest.me": ["127.0.0.1", "8.8.4.4", "10.0.0.7"]})
+    m = matcher(allow=["localtest.me", "10.0.0.7:22"])
+    resolver, sink = _resolver(m, upstream)
+    response = DnsMessage.parse(resolver.answer(_query("localtest.me", ident=7), TCP))
+    assert response.id == 7
+    assert [r.address for r in response.answers] == [ip("8.8.4.4"), ip("10.0.0.7")]
+    assert sink.learned_records == [
+        ("localtest.me", [(ip("8.8.4.4"), 120), (ip("10.0.0.7"), 120)])
+    ]
+    assert sink.entries[0].ip == "8.8.4.4,10.0.0.7"
+    assert sink.entries[0].action == "allow"
+
+
+def test_name_resolving_only_to_protected_addresses_gets_empty_answer():
+    upstream = FakeUpstream({"localtest.me": ["127.0.0.1"]})
+    resolver, sink = _resolver(matcher(allow=["localtest.me"]), upstream)
+    response = DnsMessage.parse(resolver.answer(_query("localtest.me"), UDP))
+    assert response.rcode == ResponseCode.NOERROR
+    assert response.answers == ()
+    assert sink.learned_records == [("localtest.me", [])]
+
+
+def test_upstream_failure_is_servfail():
+    resolver, _ = _resolver(matcher(allow=["pypi.org"]), FakeUpstream(fail=True))
+    response = DnsMessage.parse(resolver.answer(_query("pypi.org"), UDP))
+    assert response.rcode == ResponseCode.SERVFAIL
+
+
+def test_host_name_is_answered_locally():
+    upstream = FakeUpstream()
+    m = matcher(allow=["host:5432"], host=["192.168.65.254"])
+    resolver, _ = _resolver(m, upstream)
+    response = DnsMessage.parse(resolver.answer(_query(HOST_NAME), UDP))
+    assert [r.address for r in response.answers] == [ip("192.168.65.254")]
+    aaaa = DnsMessage.parse(resolver.answer(_query(HOST_NAME, RecordType.AAAA), UDP))
+    assert aaaa.answers == ()
+    assert upstream.queries == []
+
+
+@pytest.mark.parametrize("query", [b"", b"garbage", b"\x00\x01" * 3])
+def test_malformed_query_is_dropped_and_logged_not_raised(query):
+    resolver, sink = _resolver(matcher(allow=["pypi.org"]), FakeUpstream())
+    assert resolver.answer(query, UDP) is None
+    assert (sink.entries[0].domain, sink.entries[0].reason) == ("(malformed)", "denied_malformed")
+
+
+def test_response_or_multi_question_query_is_formerr():
+    resolver, _ = _resolver(matcher(allow=["pypi.org"]), FakeUpstream())
+    two = DnsMessage(1, 0x0100, (Question("a.b", 1), Question("c.d", 1))).encode()
+    assert DnsMessage.parse(resolver.answer(two, UDP)).rcode == ResponseCode.FORMERR
+
+
+def test_address_entries_pin_allowed_and_block_denied_in_blacklist_mode():
+    whitelist = matcher(allow=["example.com"], deny=["example.com:25"])
+    entries = address_entries(whitelist, whitelist.name_coverage("example.com"), ip("9.9.9.9"), 60)
+    assert [e.kind for e in entries] == [PinKind.ALLOW]
+    assert all(s.decision.allowed for s in entries[0].segments)
+
+    blacklist = matcher("allow", deny=["example.com:25"])
+    entries = address_entries(blacklist, blacklist.name_coverage("example.com"), ip("9.9.9.9"), 60)
+    assert [e.kind for e in entries] == [PinKind.DENY]
+    assert [str(s.ports) for s in entries[0].segments] == ["25", "25"]
+
+
+def test_dns_server_answers_over_udp_and_tcp():
+    resolver, _ = _resolver(
+        matcher(allow=["pypi.org"]), FakeUpstream({"pypi.org": ["151.101.0.223"]})
+    )
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    tcp = socket.create_server(("127.0.0.1", 0))
+    threading.Thread(target=DnsServer(resolver, udp, tcp).serve_forever, daemon=True).start()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(5)
+        client.sendto(_query("pypi.org"), udp.getsockname())
+        assert DnsMessage.parse(client.recv(4096)).answers[0].address == ip("151.101.0.223")
+    with socket.create_connection(tcp.getsockname(), timeout=5) as client:
+        query = _query("pypi.org")
+        client.sendall(len(query).to_bytes(2, "big") + query)
+        assert DnsMessage.parse(read_tcp_message(client)).rcode == ResponseCode.NOERROR
+
+
+# ---- NFLOG parsing -------------------------------------------------------------------
+
+
+def _nflog_datagram(prefix: str, packet: bytes) -> bytes:
+    def attr(kind: int, payload: bytes) -> bytes:
+        length = 4 + len(payload)
+        return struct.pack("=HH", length, kind) + payload + b"\0" * (-length % 4)
+
+    body = struct.pack("=BBH", 2, 0, 0) + attr(10, prefix.encode() + b"\0") + attr(9, packet)
+    return struct.pack("=IHHII", 16 + len(body), (4 << 8) | 0, 0, 0, 0) + body
+
+
+def _ipv4_tcp(dst: str, port: int) -> bytes:
+    header = (
+        bytes([0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0]) + ip("10.0.0.2").packed + ip(dst).packed
+    )
+    return header + struct.pack("!HH", 40000, port) + b"\0" * 16
+
+
+def test_nflog_datagram_is_decoded():
+    data = _nflog_datagram("bulbi|deny|denied_protected|-", _ipv4_tcp("169.254.169.254", 80))
+    (attempt,) = list(parse_datagram(data))
+    assert attempt.tag == LogTag(Action.DENY, Reason.DENIED_PROTECTED)
+    assert (attempt.address, attempt.port, attempt.protocol) == (ip("169.254.169.254"), 80, TCP)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"", b"\xff" * 7, b"\xff" * 64, _nflog_datagram("other|x", _ipv4_tcp("1.1.1.1", 1)),
+     _nflog_datagram("bulbi|allow|allowed_by_dns|-", b"\x45")],
+)  # fmt: skip
+def test_nflog_garbage_yields_nothing(data):
+    assert list(parse_datagram(data)) == []
+
+
+def test_nflog_bind_messages_are_well_formed():
+    for message in bind_messages(1):
+        assert struct.unpack_from("=I", message)[0] == len(message)
+        assert struct.unpack_from("=H", message, 4)[0] == (4 << 8) | 1
+
+
+# ---- Audit log -----------------------------------------------------------------------
+
+
+def test_audit_entry_keeps_legacy_keys_and_adds_new_ones(tmp_path):
+    log = tmp_path / ".bulbi" / "proxy.log"
+    writer = AuditLogWriter(log)
+    entry = LogEntry("T", "pypi.org", "allow", "TCP", "151.101.0.223:443",
+                     "allowed_by_dns", None, "151.101.0.223", 443, "tcp")  # fmt: skip
+    writer.write(entry)
+    log.write_text(
+        log.read_text()
+        + '{"timestamp": "old", "domain": "a", "action": "deny", "method": "GET", "url": "u"}\n'
+    )
+    raw = json.loads(log.read_text().splitlines()[0])
+    assert list(raw) == [
+        "timestamp",
+        "domain",
+        "action",
+        "method",
+        "url",
+        "reason",
+        "rule",
+        "ip",
+        "port",
+        "proto",
+    ]
+    entries = AuditLogReader(log).entries()
+    assert entries[0] == entry
+    assert (entries[1].method, entries[1].reason, entries[1].port) == ("GET", None, None)
+
+
+def test_audit_reader_rejects_malformed_lines(tmp_path):
+    log = tmp_path / "proxy.log"
+    log.write_text('{"action": "deny"}\n\nnot json\n')
+    with pytest.raises(AuditLogError, match="line 3"):
+        AuditLogReader(log).entries()
+
+
+# ---- Host relay ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def echo_port():
+    server = socket.create_server(("::1", 0), family=socket.AF_INET6)
+    port = server.getsockname()[1]
+
+    def serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                conn.sendall(conn.recv(1024))
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield port
+    server.close()
+
+
+def _relay(port: int) -> HostRelay:
+    relay = HostRelay("127.0.0.1", [port], target_host="::1")
+    relay.start()
+    return relay
+
+
+def test_relay_forwards_from_allowed_source(echo_port):
+    relay = _relay(echo_port)
+    relay.allow_source("127.0.0.1")
+    try:
+        with socket.create_connection(("127.0.0.1", echo_port), timeout=5) as client:
+            client.sendall(b"ping")
+            assert client.recv(16) == b"ping"
+    finally:
+        relay.stop()
+
+
+def test_relay_refuses_other_sources(echo_port):
+    relay = _relay(echo_port)
+    relay.allow_source("172.30.0.2")
+    try:
+        with socket.create_connection(("127.0.0.1", echo_port), timeout=5) as client:
+            client.sendall(b"ping")
+            try:
+                received = client.recv(16)
+            except ConnectionResetError:
+                received = b""
+            assert received == b""
+    finally:
+        relay.stop()
+
+
+def test_relay_listens_only_on_declared_ports(echo_port):
+    relay = _relay(echo_port)
+    try:
+        assert relay.ports == [echo_port]
+        with socket.create_server(("127.0.0.1", 0)) as spare:
+            free_port = spare.getsockname()[1]
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", free_port), timeout=2)
+    finally:
+        relay.stop()
