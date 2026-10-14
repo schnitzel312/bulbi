@@ -43,16 +43,18 @@ def test_large_files_never_go_through_process_arguments():
 
 def test_write_file_fails_when_parent_cannot_be_created():
     container = FakeContainer("c")
-    container.exec_responses[("mkdir", "-p", "/root")] = FakeExecRun(1, b"Permission denied")
+    container.exec_responses[("mkdir", "-p", "/home/bulbi/locked")] = FakeExecRun(
+        1, b"Permission denied"
+    )
     with pytest.raises(SandboxError, match="Permission denied"):
-        DockerContainerHandle(container).write_file("/root/x", "y")
+        DockerContainerHandle(container).write_file("/home/bulbi/locked/x", "y")
 
 
 def test_write_file_fails_when_archive_is_rejected():
     container = FakeContainer("c")
     container.put_archive = lambda path, data: False  # type: ignore[method-assign]
-    with pytest.raises(SandboxError, match="failed to write /x"):
-        DockerContainerHandle(container).write_file("/x", "y")
+    with pytest.raises(SandboxError, match="failed to write /home/bulbi/x"):
+        DockerContainerHandle(container).write_file("/home/bulbi/x", "y")
 
 
 def test_docker_errors_become_sandbox_errors():
@@ -72,3 +74,25 @@ def test_exec_runs_as_sandbox_user_and_decodes_output():
     result = DockerContainerHandle(container).exec(["claude", "--version"])
     assert (result.exit_code, result.output) == (0, "2.0.1\n")
     assert container.exec_calls == [(["claude", "--version"], "bulbi")]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/p2", "/home/bulbi/../../etc/p2", "relative/file", "/home/bulbi", "/home/bulbix/f"],
+)
+def test_write_file_is_restricted_to_the_container_home(path: str):
+    """put_archive extracts as root, so the handle itself must keep writes inside $HOME."""
+    container = FakeContainer("c")
+    with pytest.raises(SandboxError, match="outside /home/bulbi"):
+        DockerContainerHandle(container).write_file(path, "x")
+    assert container.archives == []
+    assert container.exec_calls == []
+
+
+def test_written_files_carry_the_current_time():
+    container = FakeContainer("c")
+    DockerContainerHandle(container, clock=lambda: 1_700_000_000.9).write_file(
+        "/home/bulbi/f", "x"
+    )
+    member, _ = _extract(container.archives[0][1])
+    assert member.mtime == 1_700_000_000

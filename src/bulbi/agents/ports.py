@@ -26,7 +26,7 @@ class ExecResult:
 
 
 class ContainerHandle(ABC):
-    """A started box, seen from inside: run commands and write files as the sandbox user."""
+    """A started box, seen from inside: run commands as the sandbox user and write its files."""
 
     @abstractmethod
     def exec(self, argv: Sequence[str]) -> ExecResult:
@@ -34,4 +34,9 @@ class ContainerHandle(ABC):
 
     @abstractmethod
     def write_file(self, path: str, content: str, *, mode: int = DEFAULT_FILE_MODE) -> None:
-        """Create or replace ``path`` (and its parent directories), owned by the sandbox user."""
+        """Create or replace ``path`` and its parent directories, owned by the sandbox user.
+
+        ``path`` must be absolute and inside the sandbox user's home directory; anything
+        else raises :class:`~bulbi.errors.SandboxError`. Implementations may write with
+        more privilege than the user has, which is why the location is restricted.
+        """
