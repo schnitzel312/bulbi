@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from bulbi.spec import BulbiSpec
-from bulbi.tools import available_tools, parse_tool_spec
+from bulbi.errors import ToolError
+from bulbi.tools import ToolRegistry
 
 
 @dataclass
@@ -21,25 +22,13 @@ class ValidationResult:
 def validate_spec(spec: BulbiSpec) -> ValidationResult:
     """Validate a parsed spec and return errors and warnings."""
     result = ValidationResult()
-    tool_table = available_tools()
+    tools = ToolRegistry.builtin()
 
     # Check tools are known
     for tool_spec in spec.tools.allow:
         try:
-            name, version = parse_tool_spec(tool_spec)
-            if name not in tool_table:
-                result.errors.append(
-                    f"unknown tool '{name}'. "
-                    f"Available: {', '.join(sorted(tool_table))}"
-                )
-            elif version:
-                entry = tool_table[name]
-                if "allowed_versions" in entry and version not in entry["allowed_versions"]:
-                    result.errors.append(
-                        f"unsupported version '{version}' for {name}. "
-                        f"Available: {', '.join(entry['allowed_versions'])}"
-                    )
-        except ValueError as e:
+            tools.resolve(tool_spec)
+        except ToolError as e:
             result.errors.append(str(e))
 
     # Check mounts
@@ -97,7 +86,7 @@ def validate_spec(spec: BulbiSpec) -> ValidationResult:
 
     # Warn about powerful interpreters
     interpreter_tools = {"python", "node", "bun", "ruby"}
-    allowed_names = {parse_tool_spec(t)[0] for t in spec.tools.allow}
+    allowed_names = {tools.parse(t).name for t in spec.tools.allow}
     active_interpreters = interpreter_tools & allowed_names
     if active_interpreters:
         result.warnings.append(

@@ -11,7 +11,7 @@ import docker
 from bulbi.agents import get_agent_config
 from bulbi.constants import CONTAINER_HOME, CONTAINER_USER, CONTAINER_WORKSPACE, DOCKER_LABEL
 from bulbi.spec import BulbiSpec
-from bulbi.tools import ALWAYS_INCLUDED, resolve_all, resolve_tool
+from bulbi.tools import BASE_PACKAGES, ToolRegistry
 
 
 def generate_dockerfile(spec: BulbiSpec) -> str:
@@ -22,13 +22,14 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
     (e.g. `poetry install`) are deferred to an entrypoint script that runs
     at container start, since the project is bind-mounted at runtime.
     """
-    resolved = resolve_all(spec.tools.allow)
+    tools = ToolRegistry.builtin()
+    resolved = tools.resolve_all(spec.tools.allow)
     agent_config = get_agent_config(spec.box.agent)
 
     # Collect all apt packages (deduplicated, stable order).
     seen: set[str] = set()
     packages: list[str] = []
-    for pkg in ALWAYS_INCLUDED:
+    for pkg in BASE_PACKAGES:
         if pkg not in seen:
             seen.add(pkg)
             packages.append(pkg)
@@ -43,7 +44,7 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
         for dep_name in agent_config.requires:
             already_have = any(t.name == dep_name for t in resolved)
             if not already_have:
-                dep_tool = resolve_tool(dep_name)
+                dep_tool = tools.resolve(dep_name)
                 for pkg in dep_tool.packages:
                     if pkg not in seen:
                         seen.add(pkg)
@@ -72,7 +73,7 @@ def generate_dockerfile(spec: BulbiSpec) -> str:
         for dep_name in agent_config.requires:
             already_have = any(t.name == dep_name for t in resolved)
             if not already_have:
-                dep_tool = resolve_tool(dep_name)
+                dep_tool = tools.resolve(dep_name)
                 if dep_tool.post_install:
                     cmds = " && \\\n    ".join(dep_tool.post_install)
                     lines.append(f"# post-install: {dep_name} (agent dependency)")
