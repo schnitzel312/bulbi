@@ -329,3 +329,31 @@ def test_default_docker_factory_errors_are_wrapped_once(tmp_path: Path, monkeypa
     with pytest.raises(SandboxError) as excinfo:
         _ = app.docker
     assert str(excinfo.value) == "Docker is not available: no socket"
+
+
+def test_check_prints_effective_policy_and_denies(cli: Harness):
+    cli.write_spec(
+        SPEC.replace(
+            'allow = ["pypi.org"]',
+            'allow = ["pypi.org", "host:5432", "10.20.0.0/16"]\ndeny = ["evil.pypi.org"]',
+        )
+    )
+    result = cli.invoke("check")
+    assert result.exit_code == 0
+    assert (
+        "Effective policy: Whitelist. Any protocol to 1 domain, host:5432, 10.20.0.0/16. "
+        "Deny 1 rule. Local/private blocked unless listed." in result.output
+    )
+    assert "Deny" in result.output and "evil.pypi.org" in result.output
+    assert "sharing a CDN address" in result.output
+
+
+def test_check_describes_blacklist_mode(cli: Harness):
+    cli.write_spec(
+        SPEC.replace("[network]\n", '[network]\ndefault = "allow"\ndeny = ["example.com"]\n')
+    )
+    result = cli.invoke("check")
+    assert (
+        "Blacklist (best effort). Any protocol to any public destination except 1 rule."
+        in result.output
+    )

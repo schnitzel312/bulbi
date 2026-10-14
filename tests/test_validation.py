@@ -183,3 +183,48 @@ def test_non_string_secret_source_from_toml_is_a_validation_error(tmp_path):
     )
     result = validate_spec(SpecLoader().load(tmp_path))
     assert result.errors == ["secret 'K': only 'env' source is supported in v1"]
+
+
+# ---- Network rules (sandbox isolation spec §5) ---------------------------------------
+
+
+def _network(default="deny", allow=(), deny=()) -> NetworkSpec:
+    return NetworkSpec(default=default, allow=list(allow), deny=list(deny))
+
+
+def test_malformed_network_rules_are_errors():
+    result = validate_spec(_make_spec(network=_network(allow=["pypi.org", "[::1"], deny=["x:0"])))
+    assert len(result.errors) == 2
+    assert result.errors[0].startswith("network.allow: invalid network rule '[::1'")
+    assert result.errors[1].startswith("network.deny: invalid port '0'")
+
+
+def test_deny_identical_to_allow_is_an_error():
+    result = validate_spec(
+        _make_spec(network=_network(allow=["PyPI.org:443"], deny=["pypi.org:443"]))
+    )
+    assert result.errors == ["network rule 'pypi.org:443' is both allowed and denied (deny wins)"]
+
+
+def test_blacklist_mode_warns_best_effort_and_missing_denies():
+    warnings = validate_spec(_make_spec(network=_network("allow"))).warnings
+    assert any("best effort" in w for w in warnings)
+    assert any("network.deny is empty" in w for w in warnings)
+    warnings = validate_spec(_make_spec(network=_network("allow", deny=["x.com"]))).warnings
+    assert not any("network.deny is empty" in w for w in warnings)
+
+
+@pytest.mark.parametrize(
+    ("rule", "warned"),
+    [("10.20.0.0/16", True), ("192.168.1.0/24", False), ("fd00::/48", True), ("8.0.0.0/8", False)],
+)
+def test_wide_private_range_warning(rule, warned):
+    warnings = validate_spec(_make_spec(network=_network(allow=[rule]))).warnings
+    assert any("wide local/private range" in w for w in warnings) is warned
+
+
+def test_host_without_port_warning():
+    warnings = validate_spec(_make_spec(network=_network(allow=["host"]))).warnings
+    assert any("allows every port on your machine" in w for w in warnings)
+    warnings = validate_spec(_make_spec(network=_network(allow=["host:5432"]))).warnings
+    assert not any("every port" in w for w in warnings)

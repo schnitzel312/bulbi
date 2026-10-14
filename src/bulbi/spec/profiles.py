@@ -37,7 +37,7 @@ class ProfileMerger:
         return replace(
             root,
             tools=profile.tools if profile.tools is not None else root.tools,
-            network=profile.network if profile.network is not None else root.network,
+            network=self._merged_network(root.network, profile.network),
             mounts=self._merged_mounts(root.mounts, profile.mounts or {}),
         )
 
@@ -50,6 +50,14 @@ class ProfileMerger:
             yield from self._extra_entries("network", profile.network.allow, root.network.allow)
         if profile.mounts is not None:
             yield from self._mount_violations(root.mounts, profile.mounts)
+
+    @staticmethod
+    def _merged_network(root: NetworkSpec, narrowed: NetworkSpec | None) -> NetworkSpec:
+        """The profile's network, keeping every root deny rule (profiles may only add denies)."""
+        if narrowed is None:
+            return root
+        deny = list(dict.fromkeys([*root.deny, *narrowed.deny]))
+        return replace(narrowed, deny=deny)
 
     @staticmethod
     def _network_default_violations(root: NetworkSpec, narrowed: NetworkSpec) -> Iterator[str]:

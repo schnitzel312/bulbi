@@ -4,20 +4,33 @@ from __future__ import annotations
 
 from bulbi.validation.rules.limits import ResourceLimitsRule
 from bulbi.validation.rules.mounts import MountsPresentRule, WritableMountRule
-from bulbi.validation.rules.network import EmptyAllowlistRule, OpenNetworkRule
+from bulbi.validation.rules.network import (
+    AllowModeWithoutDenyRule,
+    DenyEqualsAllowRule,
+    EmptyAllowlistRule,
+    HostWithoutPortRule,
+    OpenNetworkRule,
+    RuleSyntaxRule,
+    WidePrivateRangeRule,
+)
 from bulbi.validation.rules.profiles import ProfilesNarrowRule
 from bulbi.validation.rules.secrets import SecretHostsRule, SecretSourceRule
 from bulbi.validation.rules.tools import InterpreterToolsRule, KnownToolsRule
 
 __all__ = [
+    "AllowModeWithoutDenyRule",
+    "DenyEqualsAllowRule",
     "EmptyAllowlistRule",
+    "HostWithoutPortRule",
     "InterpreterToolsRule",
     "KnownToolsRule",
     "MountsPresentRule",
     "OpenNetworkRule",
     "ProfilesNarrowRule",
     "ResourceLimitsRule",
+    "RuleSyntaxRule",
     "SecretHostsRule",
     "SecretSourceRule",
+    "WidePrivateRangeRule",
     "WritableMountRule",
 ]

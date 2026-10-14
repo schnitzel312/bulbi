@@ -83,6 +83,7 @@ class SpecParser:
         return NetworkSpec(
             default=raw.get("default", NetworkDefault.DENY),
             allow=list(raw.get("allow", [])),
+            deny=list(raw.get("deny", [])),
         )
 
     @staticmethod

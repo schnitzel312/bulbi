@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.table import Table
 
+from bulbi.cli.render.policy import SHARED_IP_NOTE, PolicyDescriber
 from bulbi.cli.render.styles import (
     ALLOWED_STYLE,
     CAUTION_STYLE,
@@ -29,6 +30,10 @@ class SpecReportRenderer:
         self._console.print(self._tools_table(spec))
         self._console.print(self._mounts_table(spec))
         self._console.print(self._network_table(spec))
+        self._console.print(
+            f"[bold]Effective policy:[/bold] {PolicyDescriber().describe(spec.network)}"
+        )
+        self._console.print(f"[dim]{SHARED_IP_NOTE}[/dim]")
         if spec.profiles:
             self._console.print(self._profiles_table(spec))
         self._console.print(self._limits_table(spec))
@@ -62,8 +67,10 @@ class SpecReportRenderer:
         table.add_column("Setting", style="bold")
         table.add_column("Value")
         table.add_row("Default policy", spec.network.default)
-        for domain in spec.network.allow:
-            table.add_row("Allow", styled(domain, ALLOWED_STYLE))
+        for rule in spec.network.allow:
+            table.add_row("Allow", styled(rule, ALLOWED_STYLE))
+        for rule in spec.network.deny:
+            table.add_row("Deny", styled(rule, DENIED_STYLE))
         return table
 
     @staticmethod

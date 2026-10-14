@@ -1,5 +1,6 @@
 """Tests for spec parsing, validation, and profile merging."""
 
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 
@@ -314,3 +315,21 @@ def test_profile_may_keep_or_narrow_network_default(sample_toml: Path):
     spec = SpecLoader().load(sample_toml)
     merged = ProfileMerger().merge(spec, ProfileSpec(network=NetworkSpec(default="deny")))
     assert merged.network.default == "deny"
+
+
+def test_network_deny_is_parsed():
+    from bulbi.spec import SpecParser
+
+    spec = SpecParser().parse(
+        {"box": {"name": "x"}, "network": {"allow": ["*.github.com"], "deny": ["gist.github.com"]}}
+    )
+    assert spec.network.deny == ["gist.github.com"]
+
+
+def test_profile_network_keeps_root_denies(sample_toml: Path):
+    from bulbi.spec import NetworkSpec, ProfileSpec
+
+    spec = SpecLoader().load(sample_toml)
+    root = replace(spec, network=replace(spec.network, deny=["evil.test"]))
+    merged = ProfileMerger().merge(root, ProfileSpec(network=NetworkSpec(allow=[], deny=["x.y"])))
+    assert merged.network.deny == ["evil.test", "x.y"]

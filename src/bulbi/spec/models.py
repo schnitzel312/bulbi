@@ -79,10 +79,14 @@ class MountSpec:
 
 @dataclass(frozen=True)
 class NetworkSpec:
-    """Outbound network policy enforced by the host proxy."""
+    """Outbound network policy enforced by the gateway (see ``bulbi.gateway``).
+
+    ``allow`` and ``deny`` hold rule strings; ``bulbi.gateway.rules`` defines their syntax.
+    """
 
     default: NetworkDefault = NetworkDefault.DENY
     allow: list[str] = field(default_factory=list)
+    deny: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         object.__setattr__(

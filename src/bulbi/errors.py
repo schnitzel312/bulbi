@@ -15,6 +15,10 @@ class SpecError(BulbiError):
     """The sandbox spec is missing or invalid."""
 
 
+class RuleError(SpecError):
+    """A ``[network]`` allow or deny rule is malformed."""
+
+
 class ToolError(BulbiError):
     """A tool reference is malformed, unknown, or pins an unsupported version."""
 

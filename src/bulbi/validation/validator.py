@@ -8,15 +8,20 @@ from bulbi.spec import BulbiSpec
 from bulbi.tools import ToolRegistry
 from bulbi.validation.base import ValidationResult, ValidationRule
 from bulbi.validation.rules import (
+    AllowModeWithoutDenyRule,
+    DenyEqualsAllowRule,
     EmptyAllowlistRule,
+    HostWithoutPortRule,
     InterpreterToolsRule,
     KnownToolsRule,
     MountsPresentRule,
     OpenNetworkRule,
     ProfilesNarrowRule,
     ResourceLimitsRule,
+    RuleSyntaxRule,
     SecretHostsRule,
     SecretSourceRule,
+    WidePrivateRangeRule,
     WritableMountRule,
 )
 
@@ -35,8 +40,13 @@ class SpecValidator:
                 KnownToolsRule(tools),
                 MountsPresentRule(),
                 WritableMountRule(),
+                RuleSyntaxRule(),
+                DenyEqualsAllowRule(),
                 OpenNetworkRule(),
+                AllowModeWithoutDenyRule(),
                 EmptyAllowlistRule(),
+                WidePrivateRangeRule(),
+                HostWithoutPortRule(),
                 ProfilesNarrowRule(),
                 SecretSourceRule(),
                 SecretHostsRule(),
