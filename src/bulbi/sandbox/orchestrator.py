@@ -16,6 +16,7 @@ from pathlib import Path
 
 from bulbi.agents import Agent, BoxContext
 from bulbi.container.gateway import GatewayManager, RunningGateway, SandboxNetwork
+from bulbi.container.gitvolume import GitVolumeManager
 from bulbi.container.identity import BoxIdentity
 from bulbi.container.manager import BoxLaunch, BoxManager, ContainerState, RunningBox
 from bulbi.container.mounts import (
@@ -32,7 +33,6 @@ from bulbi.gateway.config import GatewayConfig, HostAccess
 from bulbi.gateway.policy import NetworkPolicy
 from bulbi.gateway.relay import relay_ports
 from bulbi.gitsafety.guard import GitGuard
-from bulbi.gitsafety.isolated import BoxClones
 from bulbi.gitsafety.modes import GitModes
 from bulbi.image import ImageBuilder
 from bulbi.image.entrypoint import ATTACH_MARKER_PATH
@@ -83,7 +83,7 @@ class SandboxServices:
     hasher: SpecHasher = field(default_factory=SpecHasher)
     git_modes: GitModes = field(default_factory=GitModes.builtin)
     git_guard_factory: GitGuardFactory = GitGuard.for_project
-    git_clones: BoxClones | None = None
+    git_volumes: GitVolumeManager | None = None
 
 
 class BoxOrchestrator:
@@ -105,7 +105,7 @@ class BoxOrchestrator:
         self._observer = observer or SandboxObserver()
         self.identity = BoxIdentity(project.key, spec.box.name, profile)
         self._git_mode = services.git_modes.create(
-            spec.git.mode, project, self.identity, services.git_clones
+            spec.git.mode, project, self.identity, services.git_volumes
         )
         self._planner = services.mount_planner_factory(project, self._git_mode.metadata_mounts())
         self.git_guard = services.git_guard_factory(
@@ -192,6 +192,20 @@ class BoxOrchestrator:
             self._stop(box)
             return True
 
+    def running_box(self) -> RunningBox:
+        """The project's existing box, started if stopped, without opening a session or
+        checking it (``bulbi pull`` must work on a box whose history broke)."""
+        with self._services.lock_factory(self.state_dir).hold():
+            observation = self._observe()
+            box, gateway = observation.box, observation.gateway
+            if box is None or gateway is None:
+                raise SandboxError("this project has no box yet; run `bulbi run` first")
+            if box.running and gateway.running:
+                return self._services.boxes.attach(box.id)
+            network = self._spec.network
+            policy = NetworkPolicy.parse(network.default, network.allow, network.deny)
+            return self._start_existing(box, gateway, policy, prepare=False)
+
     def recreate(self) -> RunningBox:
         """Throw the box away and build it again from the current spec (``bulbi restart``)."""
         with self._services.lock_factory(self.state_dir).hold():
@@ -235,12 +249,12 @@ class BoxOrchestrator:
             assert observation.box is not None
             box = self._services.boxes.attach(observation.box.id)
             self._ensure_relay(policy)
-            self._git_mode.attach(box_image, box.handle)
+            self._git_mode.attach(box.handle)
             self._agent.refresh(box.handle, self.context)
             return box
         if plan is BoxPlan.START:
             assert observation.box is not None and observation.gateway is not None
-            return self._start_existing(observation.box, observation.gateway, policy, box_image)
+            return self._start_existing(observation.box, observation.gateway, policy)
         if plan is BoxPlan.RECREATE:
             self._remove_all()
         return self._create(policy, box_image, gateway_image, spec_hash)
@@ -262,7 +276,7 @@ class BoxOrchestrator:
             self._observer.starting_container()
             context = self.context
             mounts = self._planner.plan(self._spec)
-            self._git_mode.provision(box_image)
+            self._git_mode.prepare_host()
             exposure = host_exposure(mounts)
             self.git_guard.record_baseline(
                 exposure.writable, exposure.protected, self._project.git_dir
@@ -281,14 +295,21 @@ class BoxOrchestrator:
                 )
             )
             rollback.callback(services.boxes.remove, box.id)
+            self._git_mode.prepare_box(box.handle, created=True)
             self._agent.prepare_container(box.handle, context)
             rollback.pop_all()
         return box
 
     def _start_existing(
-        self, box: ContainerState, gateway: ContainerState, policy: NetworkPolicy, image: str
+        self,
+        box: ContainerState,
+        gateway: ContainerState,
+        policy: NetworkPolicy,
+        *,
+        prepare: bool = True,
     ) -> RunningBox:
-        """Stopped box, same spec: gateway first, then the box, then prepare again."""
+        """Stopped box, same spec: gateway first, then the box, then prepare again
+        (unless ``prepare`` is false: just start it, e.g. to pull from it)."""
         services = self._services
         network = services.gateways.find_network(self.identity)
         if network is None:
@@ -301,9 +322,12 @@ class BoxOrchestrator:
         services.gateways.wait_ready(running_gateway)
         self._start_relay(policy, network, running_gateway)
         self._observer.starting_container()
-        self._git_mode.provision(image)
+        if prepare:
+            self._git_mode.prepare_host()
         started = services.boxes.start(box.id)
-        self._agent.prepare_container(started.handle, self.context)
+        if prepare:
+            self._git_mode.prepare_box(started.handle, created=False)
+            self._agent.prepare_container(started.handle, self.context)
         return started
 
     def _start_gateway(

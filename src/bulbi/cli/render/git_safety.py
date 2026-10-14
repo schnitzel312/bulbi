@@ -20,8 +20,11 @@ GUARDED_RESIDUAL = (
     'for a full guarantee use [git] mode = "isolated".'
 )
 ISOLATED_NOTE = (
-    "Isolated git: the box commits to its own clone (`bulbi pull` fetches its branches "
-    "as bulbi/<branch>). New .git entries in the working tree are still scanned for."
+    "Isolated git: the box has its own small git dir (a volume of a few MB: refs, index "
+    "and its new commits) and reads history from this repository's objects read-only; "
+    "it never sees this repository's config, hooks or refs. `bulbi pull` fetches its "
+    "branches as bulbi/<branch> from a bundle. New .git entries in the working tree are "
+    "still scanned for."
 )
 
 

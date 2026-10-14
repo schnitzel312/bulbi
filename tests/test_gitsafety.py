@@ -6,11 +6,18 @@ when the *host* runs ``git status``. They fail without the scan's neutralisation
 
 import json
 import os
+import shutil
 import subprocess
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
+from bulbi.agents import ContainerHandle, ExecResult
+from bulbi.constants import CONTAINER_HOME
+from bulbi.container.execstream import BoxStream
+from bulbi.container.gitvolume import GitVolumeManager
+from bulbi.container.identity import BoxIdentity
 from bulbi.container.mounts import MountPlanner, host_exposure
 from bulbi.errors import GitSafetyError
 from bulbi.gateway.audit import AuditLogReader, audit_log_path
@@ -32,10 +39,21 @@ from bulbi.gitsafety.config import (
 )
 from bulbi.gitsafety.hostgit import HostGit
 from bulbi.gitsafety.inventory import GitInventory
-from bulbi.gitsafety.isolated import BoxClonePuller, BoxClones
+from bulbi.gitsafety.isolated import (
+    BROKEN_PREFIX,
+    HOST_OBJECTS_MOUNT,
+    BoxRepo,
+    BundlePuller,
+    CheckoutSlot,
+    HostRefsExporter,
+    HostRepoState,
+    safe_config,
+)
+from bulbi.gitsafety.modes import IsolatedGitMode
 from bulbi.gitsafety.quarantine import QUARANTINE_DIR
 from bulbi.project import Project, ProjectLocator
 from bulbi.spec import BoxSpec, BulbiSpec, FindingPolicy, GitSpec, MountSpec, ToolsSpec
+from tests.fakes import FakeContainerHandle
 from tests.repos import add_worktree, git, make_repo
 
 SPEC = BulbiSpec(
@@ -547,58 +565,243 @@ def test_inventory_does_not_descend_into_bulbi_state(repo):
     assert list(snapshot.entries) == [repo / ".git"]
 
 
-# ---- isolated mode: vetting and fetching a box clone ----------------------------------
+# ---- isolated mode (spec §3): the box repo, built and checked with real git ------------
+#
+# LocalBox runs the box-side commands on this machine. The "box view" of a project is a
+# checkout whose .git is an empty directory (the volume); the host repository is separate
+# and reached only through alternates, as in the box.
+
+
+class LocalBox(ContainerHandle):
+    """A ContainerHandle running locally, with the box's fixed paths translated."""
+
+    def __init__(self, home: Path, host_objects: Path) -> None:
+        self.paths = {CONTAINER_HOME: str(home), HOST_OBJECTS_MOUNT: str(host_objects)}
+        self.root_commands: list[list[str]] = []
+
+    def _local(self, text: str) -> str:
+        for box_path, local in self.paths.items():
+            text = text.replace(box_path, local)
+        return text
+
+    def exec(self, argv, *, as_root=False):
+        if as_root:
+            self.root_commands.append(list(argv))
+        result = subprocess.run(
+            [self._local(arg) for arg in argv], capture_output=True, text=True, check=False
+        )
+        return ExecResult(result.returncode, result.stdout + result.stderr)
+
+    def write_file(self, path, content, *, mode=0o644):
+        target = Path(self._local(path))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self._local(content))
+
+
+class LocalStream(BoxStream):
+    """BoxStream running locally (the fake runner for bundle pulls)."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, argv, sink):
+        self.calls.append(list(argv))
+        result = subprocess.run(list(argv), capture_output=True, check=False)
+        sink.write(result.stdout)
+        return ExecResult(result.returncode, result.stderr.decode())
+
+
+@dataclass
+class Isolated:
+    host: Project
+    view: Project
+    box: LocalBox
+
+    @property
+    def repo(self) -> BoxRepo:
+        return BoxRepo(self.box, self.view)
+
+    def box_git(self, *args: str) -> str:
+        return git(self.view.root, *args)
 
 
 @pytest.fixture
-def box_clone(repo, tmp_path) -> Path:
-    """What `bulbi pull` exports: a bare clone with a commit the agent made."""
-    export = tmp_path / "export"
-    subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(export)], check=True)
-    work = tmp_path / "work"
-    subprocess.run(["git", "clone", "-q", str(export), str(work)], check=True)
-    (work / "agent.txt").write_text("done\n")
-    git(work, "add", "agent.txt")
-    git(work, "commit", "-q", "-m", "agent work")
-    git(work, "push", "-q", "origin", "main")
-    return export
+def isolated(tmp_path, repo) -> Isolated:
+    git(repo, "tag", "-a", "v1", "-m", "release")
+    git(repo, "branch", "side")
+    add_worktree(repo, tmp_path / "trees" / "wt", "wt")
+    view_root = tmp_path / "box" / "app"
+    subprocess.run(["git", "clone", "-q", str(repo), str(view_root)], check=True)
+    shutil.rmtree(view_root / ".git")
+    (view_root / ".git").mkdir()
+    view = Project(view_root, view_root, view_root, view_root, (view_root,), view_root / ".git")
+    box = LocalBox(tmp_path / "home", repo / ".git" / "objects")
+    return Isolated(_project(repo), view, box)
 
 
-def _puller() -> BoxClonePuller:
-    return BoxClonePuller(BoxClones(volumes=None))  # type: ignore[arg-type]
+def _host_state(isolated: Isolated):
+    state = HostRefsExporter().export(isolated.host)
+    return replace(state, slots=())  # the box view has no linked worktrees
 
 
-def test_pull_fetches_into_the_bulbi_namespace(repo, box_clone):
-    result = _puller().fetch(box_clone, repo, "main")
-    assert result.refs == ("bulbi/main",)
-    assert git(repo, "log", "-1", "--format=%s", "bulbi/main") == "agent work"
-    assert git(repo, "log", "-1", "--format=%s", "main") == "initial"
+def test_safe_config_runs_nothing_and_never_gcs(tmp_path):
+    config = tmp_path / "config"
+    for object_format in ("sha1", "sha256"):
+        config.write_text(safe_config(object_format))
+        entries = HostGitConfigReader().read(config)
+        registry = ExecConfigRegistry.builtin()
+        assert not [e for e in entries if registry.is_exec(e.key, e.value)]
+        assert ConfigEntry("gc.auto", "0") in entries
+    assert ConfigEntry("extensions.objectformat", "sha256") in entries
 
 
-def test_pull_refuses_a_clone_whose_config_runs_code(repo, box_clone, tmp_path):
-    marker = tmp_path / "PWNED"
-    hook = _hook_script(tmp_path, marker)
-    git(box_clone, "config", "uploadpack.packObjectsHook", str(hook))
-    include = tmp_path / "inc.cfg"
-    include.write_text(f"[core]\n\tsshCommand = {hook}\n")
-    git(box_clone, "config", "include.path", str(include))
-    with pytest.raises(GitSafetyError, match="refusing to pull") as raised:
-        _puller().fetch(box_clone, repo)
-    assert "uploadpack.packobjectshook" in str(raised.value)
-    assert "core.sshcommand" in str(raised.value)
-    assert not marker.exists()
+def test_refs_export_reads_refs_heads_and_tags_but_never_config(isolated):
+    git(isolated.host.root, "config", "remote.origin.url", "https://token@example.com/x")
+    state = HostRefsExporter().export(isolated.host)
+    names = {ref.name for ref in state.refs}
+    assert names == {"refs/heads/main", "refs/heads/side", "refs/heads/wt", "refs/tags/v1"}
+    tag = next(ref for ref in state.refs if ref.name == "refs/tags/v1")
+    assert tag.peeled == git(isolated.host.root, "rev-parse", "v1^{commit}")
+    assert state.head == "ref: refs/heads/main" and state.object_format == "sha1"
+    assert [(slot.name, slot.head) for slot in state.slots] == [("wt", "ref: refs/heads/wt")]
+    assert "token" not in state.packed_refs()
+    assert state.packed_refs().startswith("# pack-refs with: peeled fully-peeled sorted")
 
 
-@pytest.mark.parametrize("redirect", [".git", "commondir"])
-def test_pull_refuses_a_clone_that_redirects_git(repo, box_clone, redirect):
-    (box_clone / redirect).write_text("gitdir: /elsewhere\n")
-    with pytest.raises(GitSafetyError, match="refusing to pull"):
-        _puller().fetch(box_clone, repo)
+def test_box_repo_shares_history_through_read_only_alternates(isolated):
+    host_refs = git(isolated.host.root, "for-each-ref")
+    isolated.repo.build(_host_state(isolated))
+
+    git_dir = isolated.view.root / ".git"
+    alternates = (git_dir / "objects" / "info" / "alternates").read_text()
+    assert alternates == f"{isolated.host.git_dir / 'objects'}\n"
+    assert isolated.box_git("log", "--format=%s", "side") == "initial"
+    assert isolated.box_git("for-each-ref") == host_refs
+    assert isolated.box_git("status", "--porcelain") == ""
+    assert isolated.box_git("config", "gc.auto") == "0"
+    copied = [p for p in (git_dir / "objects").rglob("*") if p.is_file() and "info" not in p.parts]
+    assert copied == [], "no history is copied into the box repo"
+    assert git(isolated.host.root, "for-each-ref") == host_refs
 
 
-def test_pull_rejects_bad_branch_names(repo, box_clone):
-    with pytest.raises(GitSafetyError, match="not a valid branch"):
-        _puller().fetch(box_clone, repo, "a..b")
+def test_box_repo_gives_linked_worktrees_their_admin_dir(isolated, tmp_path):
+    isolated.repo.build(_host_state(isolated))
+    checkout = tmp_path / "box" / "wt"
+    subprocess.run(
+        ["git", "clone", "-q", "-b", "wt", str(isolated.host.root), str(checkout)], check=True
+    )
+    shutil.rmtree(checkout / ".git")
+    (checkout / ".git").write_text(f"gitdir: {isolated.view.git_dir}/worktrees/wt\n")
+    isolated.repo.add_checkout(CheckoutSlot("wt", checkout, "ref: refs/heads/wt"))
+    assert git(checkout, "status", "--porcelain", "--branch") == "## wt"
+    assert isolated.repo.has_checkout("wt")
+
+
+def test_fresh_volume_is_opened_to_the_box_user_by_root(isolated):
+    isolated.view.git_dir.chmod(0o555)
+    try:
+        isolated.repo.build(_host_state(isolated))
+    finally:
+        isolated.view.git_dir.chmod(0o755)
+    assert isolated.box.root_commands == [["chmod", "0777", str(isolated.view.git_dir)]]
+
+
+def test_refresh_adds_host_branches_and_never_overwrites_the_box_s(isolated):
+    isolated.repo.build(_host_state(isolated))
+    git(isolated.view.root, "commit", "-q", "--allow-empty", "-m", "agent work")
+    git(isolated.host.root, "branch", "later")
+    git(isolated.host.root, "commit", "-q", "--allow-empty", "-m", "user work")
+    isolated.repo.refresh(_host_state(isolated))
+    assert isolated.box_git("log", "-1", "--format=%s", "main") == "agent work"
+    assert isolated.box_git("rev-parse", "later") == git(isolated.host.root, "rev-parse", "later")
+
+
+def test_pruned_host_history_is_detected_then_set_aside_and_rebuilt(isolated):
+    isolated.repo.build(_host_state(isolated))
+    assert isolated.repo.healthy()
+    git(isolated.host.root, "checkout", "-q", "-b", "doomed")
+    git(isolated.host.root, "commit", "-q", "--allow-empty", "-m", "doomed")
+    isolated.repo.refresh(_host_state(isolated))  # the box now relies on "doomed"
+    git(isolated.host.root, "checkout", "-q", "main")
+    git(isolated.host.root, "branch", "-q", "-D", "doomed")
+    git(isolated.host.root, "reflog", "expire", "--expire=now", "--all")
+    git(isolated.host.root, "gc", "-q", "--prune=now")
+    assert not isolated.repo.healthy()
+
+    aside = isolated.repo.set_aside()
+    isolated.repo.build(_host_state(isolated))
+    assert isolated.repo.healthy()
+    assert (Path(aside) / "packed-refs").is_file(), "the broken repo is kept"
+
+
+def test_bundle_pull_fetches_the_box_s_commits_into_the_bulbi_namespace(isolated):
+    isolated.repo.build(_host_state(isolated))
+    (isolated.view.root / "agent.txt").write_text("done\n")
+    git(isolated.view.root, "add", "agent.txt")
+    git(isolated.view.root, "commit", "-q", "-m", "agent work")
+    stream = LocalStream()
+    puller = BundlePuller(stream, isolated.host, box_git_dir=str(isolated.view.git_dir))
+
+    result = puller.pull("main")
+
+    assert result.refs == ("refs/remotes/bulbi/main",)
+    assert git(isolated.host.root, "log", "-1", "--format=%s", "bulbi/main") == "agent work"
+    assert git(isolated.host.root, "log", "-1", "--format=%s", "main") == "initial"
+    bundle_call = next(call for call in stream.calls if "bundle" in call)
+    assert "--not" in bundle_call, "only objects missing from the host travel"
+
+
+def test_bundle_pull_with_nothing_new_just_records_the_tips(isolated):
+    isolated.repo.build(_host_state(isolated))
+    stream = LocalStream()
+    result = BundlePuller(stream, isolated.host, box_git_dir=str(isolated.view.git_dir)).pull()
+    assert "refs/remotes/bulbi/side" in result.refs
+    assert not any("bundle" in call for call in stream.calls)
+    assert git(isolated.host.root, "rev-parse", "bulbi/side") == git(
+        isolated.host.root, "rev-parse", "side"
+    )
+
+
+def test_bundle_pull_of_an_unknown_branch_is_an_error(isolated):
+    isolated.repo.build(_host_state(isolated))
+    puller = BundlePuller(LocalStream(), isolated.host, box_git_dir=str(isolated.view.git_dir))
+    with pytest.raises(GitSafetyError, match="no branch 'nope'"):
+        puller.pull("nope")
+
+
+class _BrokenBox(FakeContainerHandle):
+    """A box repo that exists but whose history the host pruned."""
+
+    def exec(self, argv, *, as_root=False):
+        super().exec(argv, as_root=as_root)
+        return ExecResult(3 if "cat-file" in " ".join(argv) else 0, "")
+
+
+class _FixedExporter(HostRefsExporter):
+    def export(self, project):
+        return HostRepoState("sha1", "ref: refs/heads/main", ())
+
+
+def _isolated_mode(repo: Path) -> IsolatedGitMode:
+    project = _project(repo)
+    identity = BoxIdentity(project.key, "demo")
+    return IsolatedGitMode(project, identity, GitVolumeManager(None), _FixedExporter())
+
+
+def test_broken_history_refuses_attach_and_restart_of_a_stopped_box(repo):
+    mode = _isolated_mode(repo)
+    with pytest.raises(GitSafetyError, match="bulbi pull"):
+        mode.attach(_BrokenBox())
+    with pytest.raises(GitSafetyError, match="bulbi restart"):
+        mode.prepare_box(_BrokenBox(), created=False)
+
+
+def test_a_new_box_sets_a_broken_repo_aside_and_rebuilds(repo):
+    box = _BrokenBox()
+    _isolated_mode(repo).prepare_box(box, created=True)
+    scripts = [" ".join(command) for command in box.commands]
+    assert any(BROKEN_PREFIX in script and "find" in script for script in scripts)
+    assert any("git init -q --bare" in script for script in scripts)
 
 
 def test_host_git_is_hermetic(tmp_path):

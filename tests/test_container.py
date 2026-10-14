@@ -407,15 +407,20 @@ def test_bulbi_state_dir_is_read_only_in_the_box(repo):
     assert (str(state), str(state), True) in binds
 
 
-def test_isolated_git_replaces_the_git_dir_with_the_clone_volume(tmp_path, repo):
+def test_isolated_git_hides_host_metadata_and_shares_only_objects_read_only(tmp_path, repo):
     from bulbi.container.mounts import IsolatedGitMetadata, VolumeMount
 
     wt = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
-    plan = MountPlanner(_project(repo), IsolatedGitMetadata("vol")).plan(_spec())
+    pointer = tmp_path / "pointers" / "wt"
+    metadata = IsolatedGitMetadata("vol", "/bulbi/host-objects", {wt / ".git": pointer})
+    plan = MountPlanner(_project(repo), metadata).plan(_spec())
     git_dir = repo / ".git"
     assert VolumeMount("vol", str(git_dir)) in plan
-    assert not [m for m in plan if m.target != str(git_dir) and m.target.startswith(str(git_dir))]
-    assert (str(wt / ".git"), str(wt / ".git"), True) in _binds(plan)
+    assert BindMount(str(git_dir / "objects"), "/bulbi/host-objects", True) in plan
+    sources = {m.source for m in plan if isinstance(m, BindMount)}
+    assert not [s for s in sources if s.startswith(str(git_dir)) and s != str(git_dir / "objects")]
+    assert BindMount(str(pointer), str(wt / ".git"), True) in plan
+    assert BindMount(str(wt / ".git"), str(wt / ".git"), True) not in plan
 
 
 def test_host_exposure_maps_box_paths_back_to_the_host(tmp_path):
@@ -459,16 +464,38 @@ def test_clone_volume_is_per_project_not_per_profile(tmp_path):
     assert BoxIdentity(tmp_path / "other", "demo").git_volume_name != plain.git_volume_name
 
 
-def test_git_helper_runs_offline_with_only_ownership_capabilities():
+def test_box_repo_volumes_are_labelled_and_never_replaced():
     from bulbi.container.gitvolume import GitVolumeManager
-    from bulbi.container.mounts import VolumeMount
 
     client = FakeDocker()
-    result = GitVolumeManager(client).run_helper("img", "echo hi", ["a"], [VolumeMount("v", "/c")])
-    (kwargs,) = client.helper_runs
-    assert result.exit_code == 0
-    assert kwargs["network_mode"] == "none"
-    assert kwargs["cap_drop"] == ["ALL"]
-    assert kwargs["cap_add"] == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
-    assert kwargs["command"] == ["bash", "-c", "echo hi", "bulbi-git-helper", "a"]
-    assert all(c.removed for c in client.containers.by_key.values())
+    volumes = GitVolumeManager(client)
+    volumes.ensure("bulbi-git-x", {"bulbi.project": "/p/.git"})
+    first = client.volumes.by_name["bulbi-git-x"]
+    volumes.ensure("bulbi-git-x", {})
+    assert client.volumes.by_name["bulbi-git-x"] is first
+    assert first.labels == {"bulbi.project": "/p/.git", "bulbi": "true", "bulbi.role": "git-repo"}
+
+
+def test_exec_stream_writes_binary_stdout_and_keeps_stderr_apart():
+    import io
+
+    from bulbi.container.execstream import DockerExecStream
+
+    class Api:
+        def exec_create(self, container, argv, stdout, stderr, user):
+            self.created = (container, argv, user)
+            return {"Id": "e1"}
+
+        def exec_start(self, exec_id, stream, demux):
+            return iter([(b"\x00PACK", None), (None, b"warn"), (b"\xff", None)])
+
+        def exec_inspect(self, exec_id):
+            return {"ExitCode": 0}
+
+    client = FakeDocker()
+    client.api = Api()  # type: ignore[assignment]
+    sink = io.BytesIO()
+    result = DockerExecStream(client, "box-id").run(["git", "bundle"], sink)
+    assert sink.getvalue() == b"\x00PACK\xff"
+    assert (result.exit_code, result.output) == (0, "warn")
+    assert client.api.created == ("box-id", ["git", "bundle"], "bulbi")

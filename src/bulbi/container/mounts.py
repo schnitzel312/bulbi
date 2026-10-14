@@ -5,13 +5,13 @@
 * Linked worktrees whose parent directory holds nothing but worktrees of this repo are
   covered by mounting that parent once (new worktrees then appear without a restart);
   otherwise each worktree is mounted on its own. A mixed parent is never mounted.
-* Read-only overlays in every checkout: ``bulbi.toml`` and each linked worktree's
-  ``.git`` file, plus the main checkout's ``.bulbi/`` (lock, audit log, git baseline and
+* Read-only overlays in every checkout: ``bulbi.toml``, plus the main checkout's
+  ``.bulbi/`` (lock, audit log, git baseline and
   quarantine) — so the agent cannot loosen its sandbox or its own oversight.
 * The project's git metadata is exposed by a :class:`GitMetadataMounts` strategy chosen
   by ``[git] mode`` (docs/specs/git-safety.md): read-only overlays on the shared hooks,
-  config and worktree pointer files (guarded), or a volume holding the box's own clone
-  in place of the host's git directory (isolated).
+  config and worktree pointer files (guarded), or a volume holding the box's own git
+  directory in place of the host's, sharing history read-only (isolated).
 * Excluded files are masked with ``/dev/null``; excluded directories with an empty
   read-only tmpfs.
 """
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import glob
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +39,7 @@ _IGNORABLE_ENTRIES = frozenset({".DS_Store"})
 # at a config it controls (core.fsmonitor, core.hooksPath, ...) and run code on the host.
 _PROTECTED_GIT_FILES = ("config", "config.worktree", "commondir", "gitdir")
 _HOOKS_DIR = "hooks"
+_OBJECTS_DIR = "objects"
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,11 @@ class ProtectedGitMetadata(GitMetadataMounts):
     """
 
     def mounts(self, project: Project) -> Iterator[PlannedMount]:
+        for checkout in project.worktrees:
+            # A linked worktree's `.git` is a file pointing at its admin dir.
+            pointer = checkout / GIT_POINTER_FILE
+            if pointer.is_file():
+                yield BindMount(str(pointer), str(pointer), read_only=True)
         git_dir = project.git_dir
         if git_dir is None:
             return
@@ -138,14 +144,31 @@ class ProtectedGitMetadata(GitMetadataMounts):
 
 
 class IsolatedGitMetadata(GitMetadataMounts):
-    """Isolated mode: a volume with the box's own clone replaces the host's git directory."""
+    """Isolated mode: the box's own git dir (a volume) replaces the host's.
 
-    def __init__(self, volume: str) -> None:
+    The host's ``objects/`` is shared read-only (the box repo's alternates); config,
+    hooks, refs, logs and info are never mounted. Each linked worktree's ``.git`` file
+    is covered by a read-only, Bulbi-generated pointer into the volume.
+
+    Args:
+        volume: The volume holding the box's git dir.
+        objects_target: Where the host's ``objects/`` appears in the box.
+        pointers: Box path of each worktree's ``.git`` -> host file with its pointer.
+    """
+
+    def __init__(self, volume: str, objects_target: str, pointers: Mapping[Path, Path]) -> None:
         self._volume = volume
+        self._objects_target = objects_target
+        self._pointers = dict(pointers)
 
     def mounts(self, project: Project) -> Iterator[PlannedMount]:
-        if project.git_dir is not None:
-            yield VolumeMount(self._volume, str(project.git_dir))
+        git_dir = project.git_dir
+        if git_dir is None:
+            return
+        yield VolumeMount(self._volume, str(git_dir))
+        yield BindMount(str(git_dir / _OBJECTS_DIR), self._objects_target, read_only=True)
+        for target, source in self._pointers.items():
+            yield BindMount(str(source), str(target), read_only=True)
 
 
 def is_worktree_container(directory: Path, worktrees: Iterable[Path]) -> bool:
@@ -227,11 +250,9 @@ class MountPlanner:
         if not any(mount.path == PROJECT_MOUNT_PATH for mount in spec.mounts):
             return
         for checkout in self._checkouts():
-            for name in (SPEC_FILENAME, GIT_POINTER_FILE):
-                path = checkout / name
-                # A linked worktree's `.git` is a file pointing at its admin dir.
-                if path.is_file():
-                    yield BindMount(str(path), str(path), read_only=True)
+            spec_file = checkout / SPEC_FILENAME
+            if spec_file.is_file():
+                yield BindMount(str(spec_file), str(spec_file), read_only=True)
         state_dir = self._project.root / LOG_DIR
         yield (
             BindMount(str(state_dir), str(state_dir), True)

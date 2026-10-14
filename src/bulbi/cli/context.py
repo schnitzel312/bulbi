@@ -21,7 +21,6 @@ from bulbi.docker_sdk import connect_to_docker, docker_errors
 from bulbi.gateway.audit import audit_log_path
 from bulbi.gateway.config import HostAccess
 from bulbi.gitsafety.guard import GitGuard
-from bulbi.gitsafety.isolated import BoxClones
 from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.image.gateway import GatewayImageBuilder
 from bulbi.project import GitClient, Project, ProjectLocator
@@ -118,15 +117,12 @@ class AppContext:
     def session_tracker(self) -> SessionTracker:
         return DockerSessionTracker(self.docker)
 
-    def git_clones(self) -> BoxClones:
-        return BoxClones(GitVolumeManager(self.docker), current_user())
-
-    def image_builder(self) -> ImageBuilder:
-        return ImageBuilder(self.docker, DockerfileBuilder(self.tools))
+    def git_volumes(self) -> GitVolumeManager:
+        return GitVolumeManager(self.docker)
 
     def sandbox_services(self) -> SandboxServices:
         return SandboxServices(
-            images=self.image_builder(),
+            images=ImageBuilder(self.docker, DockerfileBuilder(self.tools)),
             gateway_images=GatewayImageBuilder(self.docker),
             boxes=self.box_manager(),
             gateways=self.gateway_manager(),
@@ -135,7 +131,7 @@ class AppContext:
             secret_readers=self.secret_readers,
             host_access=self._host_access,
             log_owner=current_user(),
-            git_clones=self.git_clones(),
+            git_volumes=self.git_volumes(),
         )
 
     def orchestrator(

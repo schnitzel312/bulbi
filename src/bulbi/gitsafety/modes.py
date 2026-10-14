@@ -10,11 +10,20 @@ from collections.abc import Callable, Mapping
 from typing import ClassVar
 
 from bulbi.agents.ports import ContainerHandle
+from bulbi.constants import DOCKER_LABEL_PROJECT, LOG_DIR
+from bulbi.container.gitvolume import GitVolumeManager
 from bulbi.container.identity import BoxIdentity
 from bulbi.container.mounts import GitMetadataMounts, IsolatedGitMetadata, ProtectedGitMetadata
-from bulbi.errors import SandboxError
-from bulbi.gitsafety.isolated import BoxClones, checkout_slots
-from bulbi.gitsafety.layout import WORKTREE_ADMIN_DIR
+from bulbi.errors import GitSafetyError, SandboxError
+from bulbi.gitsafety.isolated import (
+    BROKEN_HISTORY,
+    HOST_OBJECTS_MOUNT,
+    POINTERS_DIR,
+    BoxRepo,
+    HostRefsExporter,
+    pointer_files,
+    pointer_text,
+)
 from bulbi.project.locator import Project
 from bulbi.spec import GitModeKind
 
@@ -28,10 +37,15 @@ class GitMode(ABC):
     def metadata_mounts(self) -> GitMetadataMounts:
         """The mounts that expose (or replace) the project's git directory."""
 
-    def provision(self, image: str) -> None:  # noqa: B027 - optional hook
+    def prepare_host(self) -> None:  # noqa: B027 - optional hook
         """Before a box (new or stopped) starts."""
 
-    def attach(self, image: str, box: ContainerHandle) -> None:  # noqa: B027 - optional hook
+    def prepare_box(  # noqa: B027 - optional hook
+        self, box: ContainerHandle, *, created: bool
+    ) -> None:
+        """After the box started, before the agent prepares it; ``created``: a new box."""
+
+    def attach(self, box: ContainerHandle) -> None:  # noqa: B027 - optional hook
         """Before a session attaches to the running box."""
 
 
@@ -45,40 +59,71 @@ class GuardedGitMode(GitMode):
 
 
 class IsolatedGitMode(GitMode):
-    """§3: the box gets its own clone; the host's git directory is never mounted."""
+    """§3: the box owns a small git dir in a volume and reads history through read-only
+    alternates; host config, hooks and refs are never mounted."""
 
     kind = GitModeKind.ISOLATED
 
-    def __init__(self, project: Project, identity: BoxIdentity, clones: BoxClones) -> None:
+    def __init__(
+        self,
+        project: Project,
+        identity: BoxIdentity,
+        volumes: GitVolumeManager,
+        exporter: HostRefsExporter | None = None,
+    ) -> None:
         self._project = project
         self._volume = identity.git_volume_name
-        self._clones = clones
+        self._volumes = volumes
+        self._exporter = exporter or HostRefsExporter()
+        self._pointers = pointer_files(project, project.root / LOG_DIR / POINTERS_DIR)
 
     def metadata_mounts(self) -> GitMetadataMounts:
-        return IsolatedGitMetadata(self._volume)
+        return IsolatedGitMetadata(self._volume, HOST_OBJECTS_MOUNT, self._pointers)
 
-    def provision(self, image: str) -> None:
-        self._clones.seed(image, self._volume, self._project)
+    def prepare_host(self) -> None:
+        self._volumes.ensure(self._volume, {DOCKER_LABEL_PROJECT: str(self._project.key)})
+        for source in self._pointers.values():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(pointer_text(self._project, source.name))
 
-    def attach(self, image: str, box: ContainerHandle) -> None:
-        """A worktree created after the box started gets its admin dir in the clone."""
-        git_dir = self._project.git_dir
-        current = self._project.current
-        for slot in checkout_slots(self._project):
-            if slot.checkout != current or git_dir is None:
-                continue
-            head = git_dir / WORKTREE_ADMIN_DIR / slot.name / "HEAD"
-            if not box.exec(["test", "-f", str(head)]).succeeded:
-                self.provision(image)
+    def prepare_box(self, box: ContainerHandle, *, created: bool) -> None:
+        """Build the box repo, or bring an existing one up to date.
+
+        An existing repo whose history the host pruned is set aside (kept in the volume)
+        and rebuilt only when the box is being created (``bulbi restart``).
+        """
+        repo = BoxRepo(box, self._project)
+        state = self._exporter.export(self._project)
+        if not repo.exists():
+            repo.build(state)
+        elif repo.healthy():
+            repo.refresh(state)
+        elif created:
+            repo.set_aside()
+            repo.build(state)
+        else:
+            raise GitSafetyError(BROKEN_HISTORY)
+
+    def attach(self, box: ContainerHandle) -> None:
+        repo = BoxRepo(box, self._project)
+        if not repo.healthy():
+            raise GitSafetyError(BROKEN_HISTORY)
+        current = self._project.admin_dir(self._project.current)
+        if current is not None and not repo.has_checkout(current.name):
+            # A worktree created after the box started: give it an admin dir (and its
+            # branch) in the box repo.
+            repo.refresh(self._exporter.export(self._project))
 
 
-GitModeFactory = Callable[[Project, BoxIdentity, BoxClones | None], GitMode]
+GitModeFactory = Callable[[Project, BoxIdentity, GitVolumeManager | None], GitMode]
 
 
-def _isolated(project: Project, identity: BoxIdentity, clones: BoxClones | None) -> GitMode:
-    if clones is None:
+def _isolated(
+    project: Project, identity: BoxIdentity, volumes: GitVolumeManager | None
+) -> GitMode:
+    if volumes is None:
         raise SandboxError('[git] mode = "isolated" is not available here (no Docker volumes)')
-    return IsolatedGitMode(project, identity, clones)
+    return IsolatedGitMode(project, identity, volumes)
 
 
 class GitModes:
@@ -91,7 +136,7 @@ class GitModes:
     def builtin(cls) -> GitModes:
         return cls(
             {
-                GitModeKind.GUARDED: lambda _project, _identity, _clones: GuardedGitMode(),
+                GitModeKind.GUARDED: lambda _project, _identity, _volumes: GuardedGitMode(),
                 GitModeKind.ISOLATED: _isolated,
             }
         )
@@ -101,6 +146,6 @@ class GitModes:
         kind: GitModeKind,
         project: Project,
         identity: BoxIdentity,
-        clones: BoxClones | None = None,
+        volumes: GitVolumeManager | None = None,
     ) -> GitMode:
-        return self._factories[kind](project, identity, clones)
+        return self._factories[kind](project, identity, volumes)

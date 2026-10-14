@@ -717,28 +717,73 @@ def test_recreating_scans_against_the_old_baseline_before_recording_a_new_one(se
     assert not (nested / ".git").exists()
 
 
-def test_isolated_mode_seeds_a_clone_volume_and_mounts_it(tmp_path, client, services, repo):
+def _isolated_services(services, client):
     from bulbi.container.gitvolume import GitVolumeManager
-    from bulbi.gitsafety.isolated import BoxClones
 
+    return replace(services, git_volumes=GitVolumeManager(client))
+
+
+def test_isolated_mode_builds_the_box_repo_in_a_volume(tmp_path, client, services, repo):
     wt = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
-    services = replace(services, git_clones=BoxClones(GitVolumeManager(client)))
+    git_dir = str(repo / ".git")
     orchestrator = _orchestrator(
-        ProjectLocator().locate(wt), services, spec=_git_spec(mode="isolated")
+        ProjectLocator().locate(wt),
+        _isolated_services(services, client),
+        spec=_git_spec(mode="isolated"),
     )
+    name = orchestrator.identity.name
+    # A fresh volume: no repository yet, and its mount point still belongs to root.
+    client.containers.run = _with_responses(client, name, {
+        ("test", "-f", f"{git_dir}/HEAD"): FakeExecRun(1),
+        ("test", "-w", git_dir): FakeExecRun(1),
+    })  # fmt: skip
     orchestrator.ensure()
-    volume = orchestrator.identity.git_volume_name
-    assert volume in client.volumes.by_name
-    (seed,) = client.helper_runs
-    assert seed["command"][-2:] == ["wt", str(wt)]
-    seed_mounts = {(m["Target"], m["Source"], m["ReadOnly"]) for m in seed["mounts"]}
-    assert ("/bulbi/host", str(repo / ".git"), True) in seed_mounts
-    (box,) = [
-        kw for _, kw in client.containers.run_calls if kw.get("name") == orchestrator.identity.name
-    ]
-    box_mounts = {m["Target"]: m for m in box["mounts"]}
-    assert box_mounts[str(repo / ".git")]["Type"] == "volume"
-    assert not any(t.startswith(f"{repo / '.git'}/") for t in box_mounts)
+
+    assert orchestrator.identity.git_volume_name in client.volumes.by_name
+    (box,) = [kw for _, kw in client.containers.run_calls if kw.get("name") == name]
+    mounts = {m["Target"]: m for m in box["mounts"]}
+    assert mounts[git_dir]["Type"] == "volume"
+    assert (
+        mounts["/bulbi/host-objects"]["Source"],
+        mounts["/bulbi/host-objects"]["ReadOnly"],
+    ) == (
+        f"{git_dir}/objects",
+        True,
+    )
+    pointer = repo / ".bulbi" / "git-pointers" / "wt"
+    assert pointer.read_text() == f"gitdir: {git_dir}/worktrees/wt\n"
+    assert (mounts[str(wt / ".git")]["Source"], mounts[str(wt / ".git")]["ReadOnly"]) == (
+        str(pointer),
+        True,
+    )
+    container = client.containers.get(name)
+    assert (["chmod", "0777", git_dir], "root") in container.exec_calls
+    staged = {path for path, _ in container.archives}
+    assert staged == {"/home/bulbi/.bulbi-git-stage"}
+
+
+def _with_responses(client, name, responses):
+    run = client.containers.run
+
+    def run_with_responses(image, **kwargs):
+        container = run(image, **kwargs)
+        if kwargs.get("name") == name:
+            container.exec_responses.update(responses)
+        return container
+
+    return run_with_responses
+
+
+def test_isolated_attach_refuses_when_host_history_was_pruned(client, services, repo, monkeypatch):
+    from bulbi.errors import GitSafetyError
+    from bulbi.gitsafety.isolated import BoxRepo
+
+    services = _isolated_services(services, client)
+    spec = _git_spec(mode="isolated")
+    _orchestrator(ProjectLocator().locate(repo), services, spec=spec).ensure()
+    monkeypatch.setattr(BoxRepo, "healthy", lambda self: False)
+    with pytest.raises(GitSafetyError, match="host history changed under the box"):
+        _orchestrator(ProjectLocator().locate(repo), services, spec=spec).ensure()
 
 
 def test_isolated_mode_without_docker_volumes_is_an_error(tmp_path, services, repo):

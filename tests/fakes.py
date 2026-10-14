@@ -21,8 +21,8 @@ class FakeContainerHandle(ContainerHandle):
         self.modes: dict[str, int] = {}
         self._responses = responses or {}
 
-    def exec(self, argv: Sequence[str]) -> ExecResult:
-        self.commands.append(list(argv))
+    def exec(self, argv: Sequence[str], *, as_root: bool = False) -> ExecResult:
+        self.commands.append(["<root>", *argv] if as_root else list(argv))
         return self._responses.get(tuple(argv), ExecResult(exit_code=0, output=""))
 
     def write_file(self, path: str, content: str, *, mode: int = 0o644) -> None:
@@ -54,17 +54,12 @@ class FakeContainer:
         self.removed = False
         self.attrs: dict = {"NetworkSettings": {"Networks": {}}}
         self.log_output = b""
-        self.exit_code = 0
 
     def reload(self) -> None:
         pass
 
-    def logs(self, tail: int | None = None) -> bytes:
+    def logs(self, tail: int) -> bytes:
         return self.log_output
-
-    def wait(self, timeout: int | None = None) -> dict:
-        self.status = "exited"
-        return {"StatusCode": self.exit_code}
 
     def exec_run(self, argv: list[str], user: str | None = None) -> FakeExecRun:
         self.exec_calls.append((argv, user))
@@ -97,8 +92,7 @@ class FakeContainers:
 
     def run(self, image: str, **kwargs) -> FakeContainer:
         self.run_calls.append((image, kwargs))
-        name = kwargs.get("name", f"helper-{len(self.run_calls)}")
-        container = FakeContainer(name, kwargs.get("labels"))
+        container = FakeContainer(kwargs["name"], kwargs.get("labels"))
         container.attrs["Mounts"] = [
             {"Destination": m["Target"]} for m in kwargs.get("mounts", [])
         ]
@@ -226,15 +220,6 @@ class FakeDocker:
         self.networks = FakeNetworks()
         self.volumes = FakeVolumes()
         self.api = FakeApi()
-
-    @property
-    def helper_runs(self) -> list[dict]:
-        """Git helper containers (isolated mode) that were run."""
-        return [
-            kwargs
-            for _, kwargs in self.containers.run_calls
-            if (kwargs.get("labels") or {}).get("bulbi.role") == "git-helper"
-        ]
 
     @property
     def box_builds(self) -> list[dict]:
