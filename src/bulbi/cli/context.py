@@ -7,16 +7,14 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-import docker
-import docker.errors
 from rich.console import Console
 
 from bulbi.agents import Agent, AgentRegistry
+from bulbi.container.docker_sdk import connect_to_docker, docker_errors
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.manager import BoxManager
 from bulbi.container.terminal import TerminalExec
 from bulbi.detection import DetectorRegistry
-from bulbi.errors import SandboxError
 from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.sandbox import SandboxServices
 from bulbi.spec import BulbiSpec, ProfileMerger, SpecLoader
@@ -39,7 +37,7 @@ class AppContext:
         *,
         project_root: Path,
         console: Console | None = None,
-        docker_factory: DockerFactory = docker.from_env,
+        docker_factory: DockerFactory = connect_to_docker,
         terminal: TerminalExec | None = None,
         environment: EnvironmentBuilder | None = None,
         tools: ToolRegistry | None = None,
@@ -69,10 +67,8 @@ class AppContext:
 
     @cached_property
     def docker(self) -> Any:
-        try:
+        with docker_errors("Docker is not available"):
             return self._docker_factory()
-        except docker.errors.DockerException as exc:
-            raise SandboxError(f"Docker is not available: {exc}") from exc
 
     def box_manager(self) -> BoxManager:
         return BoxManager(self.docker)

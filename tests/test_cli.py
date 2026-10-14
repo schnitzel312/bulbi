@@ -305,3 +305,14 @@ def test_run_with_profile_widening_network_default_fails_before_docker(cli: Harn
     assert result.exit_code == 1
     assert "profile widens network default from 'deny' to 'allow'" in result.output
     assert cli.docker.containers.run_calls == []
+
+
+def test_importing_the_cli_does_not_load_the_docker_sdk():
+    import subprocess
+    import sys
+
+    probe = "import sys, bulbi.cli; print('docker' in sys.modules)"
+    output = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    ).stdout
+    assert output.strip() == "False"

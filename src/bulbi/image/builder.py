@@ -5,11 +5,9 @@ from __future__ import annotations
 import io
 from typing import Any
 
-import docker.errors
-
 from bulbi.agents import Agent
 from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_VALUE
-from bulbi.errors import SandboxError
+from bulbi.container.docker_sdk import docker_errors, docker_sdk
 from bulbi.image.dockerfile import DockerfileBuilder
 from bulbi.spec import BulbiSpec
 
@@ -35,20 +33,19 @@ class ImageBuilder:
         if self._exists(tag):
             return tag
         dockerfile = self._dockerfile.build(spec, agent)
-        try:
+        with docker_errors(f"failed to build image {tag}"):
             self._docker.images.build(
                 fileobj=io.BytesIO(dockerfile.encode()),
                 tag=tag,
                 labels={DOCKER_LABEL: DOCKER_LABEL_VALUE},
                 rm=True,
             )
-        except docker.errors.DockerException as exc:
-            raise SandboxError(f"failed to build image {tag}: {exc}") from exc
         return tag
 
     def _exists(self, tag: str) -> bool:
-        try:
-            self._docker.images.get(tag)
-        except docker.errors.ImageNotFound:
-            return False
+        with docker_errors(f"failed to look up image {tag}"):
+            try:
+                self._docker.images.get(tag)
+            except docker_sdk().errors.ImageNotFound:
+                return False
         return True

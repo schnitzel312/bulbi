@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, suppress
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import docker.errors
-import docker.types
-
 from bulbi.agents.ports import ContainerHandle
 from bulbi.constants import DOCKER_LABEL, DOCKER_LABEL_BOX, DOCKER_LABEL_VALUE
+from bulbi.container.docker_sdk import docker_errors, docker_sdk
 from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.mounts import BindMount
-from bulbi.errors import SandboxError
 from bulbi.spec import BulbiSpec, LimitsSpec
 
 _NAME_HASH_LENGTH = 8
@@ -67,7 +64,7 @@ class BoxManager:
     ) -> RunningBox:
         """Start an idle container for the box, replacing any stale one."""
         name = self.container_name(spec, project_root)
-        with self._docker_errors(f"failed to start container {name}"):
+        with docker_errors(f"failed to start container {name}"):
             self._remove_if_present(name)
             container = self._docker.containers.run(
                 image_tag,
@@ -86,16 +83,16 @@ class BoxManager:
 
     def stop(self, container_id: str) -> None:
         """Stop and remove a container; a container that is already gone is fine."""
-        with self._docker_errors(f"failed to stop container {container_id}"):
+        with docker_errors(f"failed to stop container {container_id}"):
             try:
                 container = self._docker.containers.get(container_id)
-            except docker.errors.NotFound:
+            except docker_sdk().errors.NotFound:
                 return
             container.stop(timeout=_STOP_TIMEOUT_SECONDS)
             container.remove()
 
     def list_boxes(self) -> list[BoxInfo]:
-        with self._docker_errors("failed to list containers"):
+        with docker_errors("failed to list containers"):
             containers = self._docker.containers.list(all=True, filters=_BULBI_FILTER)
             return [
                 BoxInfo(
@@ -108,19 +105,19 @@ class BoxManager:
             ]
 
     def remove(self, name_or_id: str) -> None:
-        with self._docker_errors(f"failed to remove container {name_or_id}"):
+        with docker_errors(f"failed to remove container {name_or_id}"):
             self._docker.containers.get(name_or_id).remove(force=True)
 
     def reset(self) -> None:
         """Remove every Bulbi container and image."""
-        with self._docker_errors("failed to reset"):
+        with docker_errors("failed to reset"):
             for container in self._docker.containers.list(all=True, filters=_BULBI_FILTER):
                 container.remove(force=True)
             for image in self._docker.images.list(filters=_BULBI_FILTER):
                 self._docker.images.remove(image.id, force=True)
 
     def _remove_if_present(self, name: str) -> None:
-        with suppress(docker.errors.NotFound):
+        with suppress(docker_sdk().errors.NotFound):
             self._docker.containers.get(name).remove(force=True)
 
     @staticmethod
@@ -132,15 +129,6 @@ class BoxManager:
 
     @staticmethod
     def _to_docker_mount(mount: BindMount) -> Any:
-        return docker.types.Mount(
+        return docker_sdk().types.Mount(
             target=mount.target, source=mount.source, type="bind", read_only=mount.read_only
         )
-
-    @staticmethod
-    @contextmanager
-    def _docker_errors(action: str) -> Iterator[None]:
-        """Re-raise Docker SDK failures as :class:`SandboxError` with some context."""
-        try:
-            yield
-        except docker.errors.DockerException as exc:
-            raise SandboxError(f"{action}: {exc}") from exc

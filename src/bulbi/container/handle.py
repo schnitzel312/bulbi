@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import io
 import tarfile
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from functools import cached_property
 from pathlib import PurePosixPath
 from typing import Any
 
 from bulbi.agents.ports import DEFAULT_FILE_MODE, ContainerHandle, ExecResult
 from bulbi.constants import CONTAINER_USER
+from bulbi.container.docker_sdk import docker_errors
 from bulbi.errors import SandboxError
 
 
@@ -28,7 +28,7 @@ class DockerContainerHandle(ContainerHandle):
         self._user = user
 
     def exec(self, argv: Sequence[str]) -> ExecResult:
-        with _docker_errors(f"failed to run {argv[0]} in container"):
+        with docker_errors(f"failed to run {argv[0]} in container"):
             result = self._container.exec_run(list(argv), user=self._user)
         output = result.output.decode() if result.output else ""
         return ExecResult(exit_code=result.exit_code, output=output)
@@ -37,7 +37,7 @@ class DockerContainerHandle(ContainerHandle):
         target = PurePosixPath(path)
         self._require(self.exec(["mkdir", "-p", str(target.parent)]), f"create {target.parent}")
         archive = self._single_file_archive(target.name, content.encode(), mode)
-        with _docker_errors(f"failed to write {path} in container"):
+        with docker_errors(f"failed to write {path} in container"):
             written = self._container.put_archive(str(target.parent), archive)
         if not written:
             raise SandboxError(f"failed to write {path} in container")
@@ -65,13 +65,3 @@ class DockerContainerHandle(ContainerHandle):
         if not result.succeeded:
             raise SandboxError(f"failed to {action} in container: {result.output.strip()}")
         return result.output.strip()
-
-
-@contextmanager
-def _docker_errors(action: str) -> Iterator[None]:
-    import docker.errors  # noqa: PLC0415 - keep the Docker SDK off the CLI import path
-
-    try:
-        yield
-    except docker.errors.DockerException as exc:
-        raise SandboxError(f"{action}: {exc}") from exc

@@ -171,3 +171,14 @@ def test_agent_without_install_commands_keeps_dependencies_and_env():
     assert "sh.rustup.rs" in dockerfile
     assert "ENV PRE_MODE=1" in dockerfile
     assert "Install agent" not in dockerfile
+
+
+def test_image_lookup_failure_becomes_sandbox_error():
+    client = FakeDocker()
+
+    def broken_get(tag):
+        raise docker.errors.APIError("daemon hiccup")
+
+    client.images.get = broken_get
+    with pytest.raises(SandboxError, match="daemon hiccup"):
+        _image_builder(client).build(_spec(), CLAUDE)
