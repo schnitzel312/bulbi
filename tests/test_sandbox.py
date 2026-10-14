@@ -1,7 +1,9 @@
 """Tests for the sandbox session orchestration (fake Docker, real local proxy)."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 
+import docker.errors
 import pytest
 
 from bulbi.agents import Agent, ContainerHandle
@@ -13,7 +15,7 @@ from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.sandbox import SandboxObserver, SandboxServices, SandboxSession
 from bulbi.spec import BoxSpec, BulbiSpec, MountSpec, ToolsSpec
 from bulbi.tools import ToolRegistry
-from tests.fakes import FakeDocker, RecordingRunner
+from tests.fakes import FakeDocker, FakeProxy, FakeProxyFactory, RecordingRunner
 
 
 class RecordingAgent(Agent):
@@ -119,3 +121,77 @@ def test_mounts_are_planned_for_the_project(tmp_path, client, services):
     with SandboxSession(_spec(), tmp_path, RecordingAgent(), services):
         ((_, kwargs),) = client.containers.run_calls
     assert kwargs["mounts"][0]["Source"] == str(tmp_path.resolve())
+
+
+# ---- Cleanup on the failure paths (M2) ------------------------------------------
+
+
+@pytest.fixture
+def proxies() -> FakeProxyFactory:
+    return FakeProxyFactory()
+
+
+@pytest.fixture
+def fake_proxy_services(services: SandboxServices, proxies: FakeProxyFactory) -> SandboxServices:
+    return replace(services, proxy_factory=proxies)
+
+
+def _live_containers(client: FakeDocker) -> list:
+    return [c for c in client.containers.by_key.values() if not c.removed]
+
+
+def test_build_failure_starts_nothing(tmp_path, client, proxies, fake_proxy_services):
+    def failing_build(**kwargs):
+        raise docker.errors.BuildError("boom", build_log=[])
+
+    client.images.build = failing_build
+    with pytest.raises(SandboxError, match="failed to build image"):
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), fake_proxy_services).__enter__()
+    assert proxies.created == []
+    assert client.containers.run_calls == []
+
+
+def test_container_start_failure_stops_proxy(tmp_path, client, proxies, fake_proxy_services):
+    def failing_run(image, **kwargs):
+        raise docker.errors.APIError("port conflict")
+
+    client.containers.run = failing_run
+    with pytest.raises(SandboxError, match="port conflict"):
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), fake_proxy_services).__enter__()
+    (proxy,) = proxies.created
+    assert proxy.started and proxy.stopped
+
+
+def test_prepare_failure_stops_container_and_proxy(tmp_path, client, proxies, fake_proxy_services):
+    session = SandboxSession(_spec(), tmp_path, RecordingAgent(fail=True), fake_proxy_services)
+    with pytest.raises(SandboxError, match="prepare failed"):
+        session.__enter__()
+    assert _live_containers(client) == []
+    assert proxies.created[0].stopped
+
+
+def test_interrupted_command_still_cleans_up(
+    tmp_path, client, runner, proxies, fake_proxy_services
+):
+    def interrupted(argv):
+        raise KeyboardInterrupt
+
+    services = replace(
+        fake_proxy_services, terminal=TerminalExec(runner=interrupted, is_terminal=lambda: False)
+    )
+    with (
+        pytest.raises(KeyboardInterrupt),
+        SandboxSession(_spec(), tmp_path, RecordingAgent(), services) as session,
+    ):
+        session.run(["sleep", "100"], "Running")
+    assert _live_containers(client) == []
+    assert proxies.created[0].stopped
+
+
+def test_proxy_receives_spec_network_and_project(tmp_path, proxies, fake_proxy_services):
+    agent = RecordingAgent()
+    with SandboxSession(_spec(), tmp_path, agent, fake_proxy_services):
+        pass
+    (proxy,) = proxies.created
+    assert (proxy.network, proxy.project_root) == (_spec().network, tmp_path)
+    assert agent.prepared_with[0]["HTTP_PROXY"].endswith(f":{FakeProxy.PORT}")

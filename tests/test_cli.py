@@ -15,6 +15,7 @@ from bulbi.cli.context import AppContext
 from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.terminal import TerminalExec
 from bulbi.image import ImageBuilder
+from bulbi.spec import SpecLoader
 from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
 
 SPEC = dedent("""\
@@ -34,6 +35,7 @@ SPEC = dedent("""\
     allow = ["pypi.org"]
 
     [profiles.offline]
+    tools.allow = ["git"]
     network.allow = []
 """)
 
@@ -160,6 +162,11 @@ def test_run_with_explicit_command_and_profile(cli: Harness):
     result = cli.invoke("run", "-p", "offline", "--", "pytest", "-q")
     assert result.exit_code == 0
     assert cli.executed == [["pytest", "-q"]]
+    # The profile was applied: its narrower tool list is what got built into the image.
+    (build,) = cli.docker.images.builds
+    assert "python3" not in build["dockerfile"]
+    root_spec = SpecLoader().load(cli.project_root)
+    assert build["tag"] != ImageBuilder.tag_for(root_spec)
 
 
 def test_run_unknown_profile_fails_before_docker(cli: Harness):
@@ -286,8 +293,6 @@ def test_reset_with_yes_removes_everything(cli: Harness):
 
 
 def test_image_tag_matches_spec_hash(cli: Harness):
-    from bulbi.spec import SpecLoader
-
     cli.write_spec()
     cli.invoke("run")
     expected = ImageBuilder.tag_for(SpecLoader().load(cli.project_root))

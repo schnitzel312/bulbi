@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from http.server import HTTPServer
 from socketserver import ThreadingMixIn
@@ -49,7 +50,19 @@ class ProxyHTTPServer(ThreadingMixIn, HTTPServer):
         self.context = context
 
 
-class ProxyServer:
+class NetworkProxy(ABC):
+    """A host-side proxy a sandbox routes its traffic through."""
+
+    @abstractmethod
+    def start(self, port: int = _EPHEMERAL_PORT) -> int:
+        """Start serving; returns the bound port (``0`` picks a free one)."""
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop serving; safe to call when not running."""
+
+
+class ProxyServer(NetworkProxy):
     """Runs a :class:`ProxyHTTPServer` in a background thread."""
 
     def __init__(
@@ -64,7 +77,6 @@ class ProxyServer:
         self._thread: threading.Thread | None = None
 
     def start(self, port: int = _EPHEMERAL_PORT) -> int:
-        """Start serving; returns the bound port (``0`` picks a free one)."""
         if self._server is not None:
             raise SandboxError("proxy is already running")
         self._server = ProxyHTTPServer((self._bind_host, port), self._context)
@@ -80,7 +92,6 @@ class ProxyServer:
         return bound_port
 
     def stop(self) -> None:
-        """Stop serving; safe to call when not running."""
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()

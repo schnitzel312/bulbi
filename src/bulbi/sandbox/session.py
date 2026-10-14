@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,9 +15,17 @@ from bulbi.container.mounts import MountPlanner
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
 from bulbi.image import ImageBuilder
-from bulbi.proxy import AuditLogWriter, ProxyServer, audit_log_path, policy_for
+from bulbi.proxy import AuditLogWriter, NetworkProxy, ProxyServer, audit_log_path, policy_for
 from bulbi.sandbox.observer import SandboxObserver
-from bulbi.spec import BulbiSpec
+from bulbi.spec import BulbiSpec, NetworkSpec
+
+ProxyFactory = Callable[[NetworkSpec, Path], NetworkProxy]
+MountPlannerFactory = Callable[[Path], MountPlanner]
+
+
+def audited_proxy(network: NetworkSpec, project_root: Path) -> NetworkProxy:
+    """The default proxy: the spec's network policy, audited to the project's log."""
+    return ProxyServer(policy_for(network), AuditLogWriter(audit_log_path(project_root)))
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,8 @@ class SandboxServices:
     boxes: BoxManager
     terminal: TerminalExec
     environment: EnvironmentBuilder = field(default_factory=EnvironmentBuilder)
+    proxy_factory: ProxyFactory = audited_proxy
+    mount_planner: MountPlannerFactory = MountPlanner
 
 
 class SandboxSession:
@@ -81,10 +91,7 @@ class SandboxSession:
         self._observer.building_image(self._spec)
         image_tag = self._services.images.build(self._spec, self._agent)
 
-        proxy = ProxyServer(
-            policy_for(self._spec.network),
-            AuditLogWriter(audit_log_path(self._project_root)),
-        )
+        proxy = self._services.proxy_factory(self._spec.network, self._project_root)
         proxy_port = proxy.start()
         self._cleanup.callback(proxy.stop)
 
@@ -94,7 +101,7 @@ class SandboxSession:
             self._spec,
             self._project_root,
             image_tag,
-            MountPlanner(self._project_root).plan(self._spec),
+            self._services.mount_planner(self._project_root).plan(self._spec),
             environment,
         )
         self._cleanup.callback(self._services.boxes.stop, box.id)
