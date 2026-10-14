@@ -10,7 +10,6 @@ import docker.errors
 import pytest
 
 from bulbi.agents import Agent, BoxContext, ContainerHandle
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.gateway import GatewayManager
 from bulbi.container.manager import BoxManager
 from bulbi.container.sessions import DockerSessionTracker
@@ -25,7 +24,14 @@ from bulbi.sandbox.lock import FileBoxLock
 from bulbi.sandbox.planner import BoxObservation, BoxPlan, BoxPlanner, OutdatedBoxError
 from bulbi.spec import BoxSpec, BulbiSpec, MountSpec, NetworkSpec, ToolsSpec
 from bulbi.tools import ToolRegistry
-from tests.fakes import FakeContainer, FakeDocker, FakeExecRun, FakeNetworks, RecordingRunner
+from tests.fakes import (
+    FakeContainer,
+    FakeDocker,
+    FakeExecRun,
+    FakeNetworks,
+    RecordingRunner,
+    fake_secret_readers,
+)
 from tests.repos import add_worktree, make_repo
 
 
@@ -104,10 +110,10 @@ def services(client: FakeDocker, runner: RecordingRunner) -> SandboxServices:
         gateways=GatewayManager(client, clock=lambda: 0.0, sleep=lambda _: None),
         sessions=DockerSessionTracker(client),
         terminal=TerminalExec(runner=runner, is_terminal=lambda: False),
-        environment=EnvironmentBuilder(host_env={}),
         relay_launcher_factory=FakeRelayLauncher,  # type: ignore[arg-type]
         host_access=HostAccess.DOCKER_DESKTOP,
         log_owner=(501, 20),
+        secret_readers=fake_secret_readers({}),
     )
 
 
@@ -570,3 +576,54 @@ def test_late_scattered_worktree_is_not_mounted_and_says_so(tmp_path, client, se
     _start_session(client, box)
     with pytest.raises(OutdatedBoxError):
         _orchestrator(ProjectLocator().locate(late), services).ensure()
+
+
+# ---- secrets (spec §10.3) ---------------------------------------------------------------------
+
+
+def _secret_spec(**secrets) -> BulbiSpec:
+    return replace(_spec(), secrets=secrets)
+
+
+def test_missing_user_secret_stops_the_run_before_anything_starts(tmp_path, client, services):
+    from bulbi.secrets import SecretError
+    from bulbi.spec import SecretSpec
+
+    spec = _secret_spec(GITHUB_TOKEN=SecretSpec(from_source="env"))
+    with pytest.raises(SecretError, match="GITHUB_TOKEN"):
+        _orchestrator(Project.plain(tmp_path), services, spec).ensure()
+    assert client.images.builds == [] and client.containers.run_calls == []
+
+
+def test_file_secrets_are_rewritten_on_every_attach(tmp_path, client, services):
+    from bulbi.spec import SecretSpec
+
+    values = {"~/.npmrc": "v1"}
+    services = replace(services, secret_readers=fake_secret_readers(values))
+    spec = _secret_spec(
+        NPM_RC=SecretSpec(from_source="file", source="~/.npmrc", to="file", path="~/.npmrc")
+    )
+    project = Project.plain(tmp_path)
+    box = client.containers.get(_orchestrator(project, services, spec).ensure().id)
+    values["~/.npmrc"] = "v2"  # rotated on the host
+    _orchestrator(project, services, spec).ensure()
+    written = [archive for path, archive in box.archives if path == "/home/bulbi"]
+    assert len(written) == 2
+    assert b"v2" in written[-1] and b"v1" in written[0]
+
+
+def test_env_secrets_reach_the_session_without_appearing_in_arguments(tmp_path, runner, services):
+    from bulbi.spec import SecretSpec
+
+    services = replace(services, secret_readers=fake_secret_readers({"GITHUB_TOKEN": "tok-123"}))
+    spec = _secret_spec(GITHUB_TOKEN=SecretSpec(from_source="env"))
+    orchestrator = _orchestrator(Project.plain(tmp_path), services, spec)
+    with SandboxSession(orchestrator, services) as session:
+        session.run(["env"], "Running")
+    (argv,) = runner.calls
+    assert "GITHUB_TOKEN" in argv and not any("tok-123" in arg for arg in argv)
+    assert runner.envs[0]["GITHUB_TOKEN"] == "tok-123"
+    box_kwargs = [
+        kw for _, kw in services.boxes._docker.containers.run_calls if "network_mode" in kw
+    ]
+    assert "GITHUB_TOKEN" not in box_kwargs[0]["environment"]  # never baked into the container

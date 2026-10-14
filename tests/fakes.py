@@ -7,7 +7,9 @@ from collections.abc import Sequence
 
 import docker.errors
 
-from bulbi.agents import ContainerHandle, CredentialProvider, ExecResult
+from bulbi.agents import ContainerHandle, ExecResult
+from bulbi.secrets import SecretReader, SecretReaders, SecretUnavailableError
+from bulbi.spec import SecretSource
 
 
 class FakeContainerHandle(ContainerHandle):
@@ -26,19 +28,6 @@ class FakeContainerHandle(ContainerHandle):
     def write_file(self, path: str, content: str, *, mode: int = 0o644) -> None:
         self.files[path] = content
         self.modes[path] = mode
-
-
-class StaticCredentials(CredentialProvider):
-    def __init__(self, value: str | None) -> None:
-        self.value = value
-        self.reads = 0
-
-    def read(self) -> str | None:
-        self.reads += 1
-        return self.value
-
-
-# ---- Docker SDK fakes ---------------------------------------------------------
 
 
 class FakeExecRun:
@@ -222,8 +211,30 @@ class RecordingRunner:
 
     def __init__(self, returncode: int = 0) -> None:
         self.calls: list[list[str]] = []
+        self.envs: list[dict | None] = []
         self.returncode = returncode
 
-    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+    def __call__(self, argv: list[str], env=None) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(argv)
+        self.envs.append(env)
         return subprocess.CompletedProcess(argv, self.returncode)
+
+
+class FakeSecretReader(SecretReader):
+    """A host source backed by a dict; missing keys are unavailable."""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = values if values is not None else {}
+        self.reads: list[str] = []
+
+    def read(self, source: str) -> str:
+        self.reads.append(source)
+        if source not in self.values:
+            raise SecretUnavailableError(f"{source} is not set")
+        return self.values[source]
+
+
+def fake_secret_readers(values: dict[str, str] | None = None) -> SecretReaders:
+    """Every source kind reads from the same dict (no real env, keychain or commands)."""
+    reader = FakeSecretReader(values)
+    return SecretReaders({kind: reader for kind in SecretSource})

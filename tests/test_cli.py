@@ -10,17 +10,16 @@ import pytest
 from click.testing import CliRunner, Result
 from rich.console import Console
 
-from bulbi.agents import AgentRegistry, ClaudeAgent, CodexAgent, NoCredentialProvider
+from bulbi.agents import AgentRegistry, ClaudeAgent, CodexAgent
 from bulbi.cli import main
 from bulbi.cli.context import AppContext
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.terminal import TerminalExec
 from bulbi.errors import SandboxError
 from bulbi.gateway.config import HostAccess
 from bulbi.image import DockerfileBuilder, ImageBuilder
 from bulbi.spec import SpecLoader
 from bulbi.tools import ToolRegistry
-from tests.fakes import FakeContainer, FakeDocker, RecordingRunner
+from tests.fakes import FakeContainer, FakeDocker, RecordingRunner, fake_secret_readers
 
 SPEC = dedent("""\
     spec = "0.1"
@@ -46,7 +45,7 @@ SPEC = dedent("""\
 
 def _tag_for(spec) -> str:
     builder = ImageBuilder(FakeDocker(), DockerfileBuilder(ToolRegistry.builtin()))
-    return builder.tag_for(spec, ClaudeAgent(credentials=NoCredentialProvider()))
+    return builder.tag_for(spec, ClaudeAgent())
 
 
 class Harness:
@@ -57,6 +56,7 @@ class Harness:
         self.docker = FakeDocker()
         self.runner = RecordingRunner(returncode=0)
         self.docker_available = True
+        self.secrets: dict[str, str] = {}
 
     def write_spec(self, text: str = SPEC) -> None:
         (self.project_root / "bulbi.toml").write_text(text)
@@ -72,11 +72,11 @@ class Harness:
             console=Console(width=200),
             docker_factory=self._docker_factory,
             terminal=TerminalExec(runner=self.runner, is_terminal=lambda: False),
-            environment=EnvironmentBuilder(host_env={}),
             host_access=HostAccess.DOCKER_DESKTOP,
+            secret_readers=fake_secret_readers(self.secrets),
             agents=AgentRegistry(
                 [
-                    ClaudeAgent(credentials=NoCredentialProvider(), host_home=self.project_root),
+                    ClaudeAgent(host_home=self.project_root),
                     CodexAgent(),
                 ]
             ),
@@ -568,3 +568,34 @@ def test_log_shows_gateway_reasons_and_rules_next_to_legacy_lines(cli: Harness):
     assert "denied_by_rule" in result.output and "DNS" in result.output
     assert "ok.com" not in result.output
     assert "2 total entries, 1 denied" in result.output
+
+
+# ---- secrets (spec §10.3) -----------------------------------------------------------------------
+
+SECRETS_SPEC = SPEC + (
+    "\n[secrets]\n"
+    'GITHUB_TOKEN = { from = "env" }\n'
+    'NPM_RC = { from = "file", source = "~/.npmrc", to = "file", path = "~/.npmrc" }\n'
+)
+
+
+def test_check_lists_secrets_entering_the_box_without_values(cli: Harness):
+    cli.write_spec(SECRETS_SPEC)
+    cli.secrets.update({"GITHUB_TOKEN": "ghp-super-secret", "ANTHROPIC_API_KEY": "sk-secret"})
+    result = cli.invoke("check")
+    assert "Secrets entering the box" in result.output
+    for expected in ("GITHUB_TOKEN", "env: GITHUB_TOKEN", "env $GITHUB_TOKEN", "NPM_RC",
+                     "file ~/.npmrc", "CLAUDE_OAUTH (built-in)", "✓", "✗"):  # fmt: skip
+        assert expected in result.output, expected
+    assert "ghp-super-secret" not in result.output and "sk-secret" not in result.output
+    assert "The agent can read every secret it is given" in result.output
+
+
+def test_run_with_missing_secret_fails_cleanly_and_starts_nothing(cli: Harness):
+    cli.write_spec(SECRETS_SPEC)
+    cli.secrets["GITHUB_TOKEN"] = "ghp-super-secret"
+    result = cli.invoke("run")
+    assert result.exit_code == 1
+    assert "secret NPM_RC (file: ~/.npmrc) is unavailable" in result.output
+    assert "ghp-super-secret" not in result.output
+    assert cli.docker.containers.run_calls == []

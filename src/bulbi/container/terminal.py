@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 
 from bulbi.constants import ENTRYPOINT_PATH
 
-CommandRunner = Callable[[list[str]], "subprocess.CompletedProcess[bytes]"]
+CommandRunner = Callable[..., "subprocess.CompletedProcess[bytes]"]
 
 
 def _stdio_is_terminal() -> bool:
@@ -36,12 +37,21 @@ class TerminalExec:
         command: Sequence[str],
         workdir: str | None = None,
         environment: Mapping[str, str] | None = None,
+        secret_environment: Mapping[str, str] | None = None,
     ) -> int:
-        """Run ``command`` via the entrypoint (so setup runs first); return its exit code."""
+        """Run ``command`` via the entrypoint (so setup runs first); return its exit code.
+
+        Secret values are passed as ``-e NAME`` and handed to the Docker CLI through its
+        own environment, so they never appear in any process's arguments.
+        """
         options = ["-it"] if self._is_terminal() else []
         if workdir:
             options += ["-w", workdir]
         for key, value in (environment or {}).items():
             options += ["-e", f"{key}={value}"]
+        for key in secret_environment or {}:
+            options += ["-e", key]
         argv = ["docker", "exec", *options, container_id, ENTRYPOINT_PATH, *command]
-        return self._run(argv).returncode
+        if not secret_environment:
+            return self._run(argv).returncode
+        return self._run(argv, env={**os.environ, **secret_environment}).returncode

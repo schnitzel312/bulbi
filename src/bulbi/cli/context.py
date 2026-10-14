@@ -11,7 +11,6 @@ from rich.console import Console
 
 from bulbi.agents import Agent, AgentRegistry
 from bulbi.constants import SPEC_FILENAME
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.gateway import GatewayManager
 from bulbi.container.manager import BoxManager
 from bulbi.container.sessions import DockerSessionTracker, SessionTracker
@@ -24,6 +23,7 @@ from bulbi.image.gateway import GatewayImageBuilder
 from bulbi.project import GitClient, Project, ProjectLocator
 from bulbi.sandbox import BoxOrchestrator, SandboxObserver, SandboxServices
 from bulbi.sandbox.host import current_user, detect_host_access
+from bulbi.secrets import SecretReaders
 from bulbi.spec import BulbiSpec, ProfileMerger, SpecLoader
 from bulbi.tools import ToolRegistry
 from bulbi.validation import SpecValidator
@@ -46,7 +46,7 @@ class AppContext:
         console: Console | None = None,
         docker_factory: DockerFactory = connect_to_docker,
         terminal: TerminalExec | None = None,
-        environment: EnvironmentBuilder | None = None,
+        secret_readers: SecretReaders | None = None,
         tools: ToolRegistry | None = None,
         agents: AgentRegistry | None = None,
         detectors: DetectorRegistry | None = None,
@@ -63,7 +63,7 @@ class AppContext:
         self._profiles = ProfileMerger()
         self._docker_factory = docker_factory
         self._terminal = terminal or TerminalExec()
-        self._environment = environment or EnvironmentBuilder()
+        self.secret_readers = secret_readers or SecretReaders.builtin()
         self._host_access = host_access or detect_host_access()
         self._locator = ProjectLocator(git)
 
@@ -114,7 +114,7 @@ class AppContext:
             gateways=self.gateway_manager(),
             sessions=self.session_tracker(),
             terminal=self._terminal,
-            environment=self._environment,
+            secret_readers=self.secret_readers,
             host_access=self._host_access,
             log_owner=current_user(),
         )

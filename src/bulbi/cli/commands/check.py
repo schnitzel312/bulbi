@@ -7,6 +7,7 @@ import click
 from bulbi.cli.commands.base import BulbiCommand
 from bulbi.cli.context import AppContext
 from bulbi.cli.render.spec_report import SpecReportRenderer
+from bulbi.secrets import SecretPlan, user_declarations
 
 
 class CheckCommand(BulbiCommand):
@@ -16,6 +17,8 @@ class CheckCommand(BulbiCommand):
     def execute(self, app: AppContext) -> None:
         spec = app.load_spec()
         result = app.validator.validate(spec)
-        SpecReportRenderer(app.console).render(spec, result)
+        plan = SecretPlan(app.agent_for(spec).secrets, user_declarations(spec.secrets))
+        statuses = plan.statuses(app.secret_readers)
+        SpecReportRenderer(app.console).render(spec, result, statuses)
         if not result.ok:
             click.get_current_context().exit(1)

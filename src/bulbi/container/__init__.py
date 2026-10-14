@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.manager import BoxManager, ContainerState, RunningBox
 from bulbi.container.mounts import BindMount, MountPlanner
@@ -13,7 +12,6 @@ __all__ = [
     "BoxManager",
     "ContainerState",
     "DockerContainerHandle",
-    "EnvironmentBuilder",
     "MountPlanner",
     "RunningBox",
     "TerminalExec",

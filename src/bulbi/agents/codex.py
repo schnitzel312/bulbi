@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from bulbi.agents.base import Agent
+from bulbi.secrets.model import SecretDeclaration
+from bulbi.spec import SecretSource
+
+API_KEY_VAR = "OPENAI_API_KEY"
 
 
 class CodexAgent(Agent):
@@ -12,5 +16,7 @@ class CodexAgent(Agent):
     launch_command = ("codex", "--full-auto")
     required_tools = ("node",)
     install_commands = ("npm install -g @openai/codex",)
-    api_key_vars = ("OPENAI_API_KEY",)
+    secrets = (
+        SecretDeclaration(API_KEY_VAR, SecretSource.ENV, API_KEY_VAR, optional=True, builtin=True),
+    )
     domains = ("api.openai.com",)

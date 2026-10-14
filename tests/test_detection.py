@@ -4,7 +4,7 @@ import json
 import tomllib
 from pathlib import Path
 
-from bulbi.agents import ClaudeAgent, CodexAgent, NoCredentialProvider
+from bulbi.agents import ClaudeAgent, CodexAgent
 from bulbi.detection import (
     DetectedProject,
     DetectorRegistry,
@@ -18,7 +18,7 @@ from bulbi.detection import (
 
 def generate_starter_spec(project_root: Path) -> str:
     project = DetectorRegistry.builtin().detect(project_root)
-    return StarterSpecRenderer(ClaudeAgent(credentials=NoCredentialProvider())).render(project)
+    return StarterSpecRenderer(ClaudeAgent()).render(project)
 
 
 def test_detect_python_project(tmp_path: Path):

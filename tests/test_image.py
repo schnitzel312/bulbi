@@ -6,14 +6,14 @@ import re
 import docker.errors
 import pytest
 
-from bulbi.agents import ClaudeAgent, CodexAgent, NoCredentialProvider, UnmanagedAgent
+from bulbi.agents import ClaudeAgent, CodexAgent, UnmanagedAgent
 from bulbi.errors import SandboxError
 from bulbi.image import DockerfileBuilder, EntrypointScript, ImageBuilder
 from bulbi.spec import BoxSpec, BulbiSpec, SetupSpec, ToolsSpec
 from bulbi.tools import ToolRegistry
 from tests.fakes import FakeDocker
 
-CLAUDE = ClaudeAgent(credentials=NoCredentialProvider())
+CLAUDE = ClaudeAgent()
 
 
 def _spec(tools=("python@3.12", "git"), agent="claude", setup=()) -> BulbiSpec:

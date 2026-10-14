@@ -36,9 +36,19 @@ class NetworkDefault(StrEnum):
 
 
 class SecretSource(StrEnum):
-    """Where a secret's value comes from on the host."""
+    """Where Bulbi reads a secret's value on the host (``from``)."""
 
     ENV = "env"
+    FILE = "file"
+    KEYCHAIN = "keychain"
+    COMMAND = "command"
+
+
+class SecretTarget(StrEnum):
+    """How the box receives a secret (``to``)."""
+
+    ENV = "env"
+    FILE = "file"
 
 
 @dataclass(frozen=True)
@@ -116,21 +126,22 @@ class NetworkSpec:
 
 @dataclass(frozen=True)
 class SecretSpec:
-    """A host secret and the hosts it may be sent to.
+    """One ``[secrets]`` entry (spec §10.1).
 
-    Secrets are parsed and validated only; Bulbi does not inject them anywhere yet.
-    ``from_source`` is coerced to :class:`SecretSource` when recognised and otherwise
-    kept as the raw value (whatever its type), so validation can report it.
+    ``from_source`` and ``to`` are coerced to their enums when recognised and otherwise
+    kept as the raw TOML value (whatever its type), so validation can report them.
+    ``hosts`` is accepted for compatibility and ignored until ``to = "inject"`` exists.
     """
 
-    from_source: SecretSource | str
+    from_source: SecretSource | str | None
+    source: str | None = None
+    to: SecretTarget | str = SecretTarget.ENV
+    path: str | None = None
     hosts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Raw TOML may hold any type here (e.g. a list); only strings can name a source.
-        source: object = self.from_source
-        if isinstance(source, str) and source in {member.value for member in SecretSource}:
-            object.__setattr__(self, "from_source", SecretSource(self.from_source))
+        object.__setattr__(self, "from_source", _known(SecretSource, self.from_source))
+        object.__setattr__(self, "to", _known(SecretTarget, self.to))
 
 
 @dataclass(frozen=True)
@@ -183,6 +194,13 @@ class BulbiSpec:
         }
         encoded = json.dumps(image_inputs, sort_keys=True).encode()
         return hashlib.sha256(encoded).hexdigest()[:_CONTENT_HASH_LENGTH]
+
+
+def _known(enum_type: type[_EnumT], value: object) -> object:
+    """``value`` as a member of ``enum_type`` if it names one; otherwise unchanged."""
+    if isinstance(value, str) and value in {member.value for member in enum_type}:
+        return enum_type(value)
+    return value
 
 
 def _parse_enum(enum_type: type[_EnumT], value: str, label: str) -> _EnumT:

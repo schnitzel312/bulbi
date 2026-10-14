@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from bulbi.agents import ClaudeAgent, NoCredentialProvider
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.identity import BoxIdentity
 from bulbi.container.manager import BoxLaunch, BoxManager, ContainerState
 from bulbi.container.mounts import BindMount, MountPlanner, TmpfsMount, is_worktree_container
@@ -167,20 +165,6 @@ def test_is_worktree_container(tmp_path, repo):
     (trees / "other").mkdir()
     assert not is_worktree_container(trees, [repo, wt])
     assert not is_worktree_container(tmp_path / "missing", [repo])
-
-
-# ---- EnvironmentBuilder ----------------------------------------------------------------
-
-
-def test_agent_environment_and_api_keys_are_added():
-    agent = ClaudeAgent(credentials=NoCredentialProvider())
-    env = EnvironmentBuilder(
-        host_env={"ANTHROPIC_API_KEY": "sk-1", "OPENAI_API_KEY": "nope"}
-    ).build(agent)
-    assert env["ANTHROPIC_API_KEY"] == "sk-1"
-    assert env["CLAUDE_CODE_NO_FLICKER"] == "1"
-    assert "OPENAI_API_KEY" not in env
-    assert not any("PROXY" in key.upper() for key in env)  # the gateway needs no proxy env
 
 
 # ---- TerminalExec ----------------------------------------------------------------------

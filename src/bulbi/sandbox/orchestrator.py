@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bulbi.agents import Agent, BoxContext
-from bulbi.container.environment import EnvironmentBuilder
 from bulbi.container.gateway import GatewayManager, RunningGateway, SandboxNetwork
 from bulbi.container.identity import BoxIdentity
 from bulbi.container.manager import BoxLaunch, BoxManager, ContainerState, RunningBox
@@ -35,6 +34,13 @@ from bulbi.sandbox.lock import LOCK_FILENAME, BoxLock, FileBoxLock
 from bulbi.sandbox.observer import SandboxObserver
 from bulbi.sandbox.planner import BoxObservation, BoxPlan, BoxPlanner
 from bulbi.sandbox.relay import ProcessRelayLauncher, RelayLauncher
+from bulbi.secrets import (
+    ResolvedSecret,
+    SecretDeliveries,
+    SecretPlan,
+    SecretReaders,
+    user_declarations,
+)
 from bulbi.spec import BulbiSpec
 
 MountPlannerFactory = Callable[[Project], MountPlanner]
@@ -56,7 +62,8 @@ class SandboxServices:
     gateways: GatewayManager
     sessions: SessionTracker
     terminal: TerminalExec
-    environment: EnvironmentBuilder = field(default_factory=EnvironmentBuilder)
+    secret_readers: SecretReaders = field(default_factory=SecretReaders.builtin)
+    secret_deliveries: SecretDeliveries = field(default_factory=SecretDeliveries.builtin)
     mount_planner_factory: MountPlannerFactory = MountPlanner
     lock_factory: LockFactory = file_lock
     relay_launcher_factory: RelayLauncherFactory = ProcessRelayLauncher
@@ -85,6 +92,16 @@ class BoxOrchestrator:
         self._observer = observer or SandboxObserver()
         self.identity = BoxIdentity(project.key, spec.box.name, profile)
         self._planner = services.mount_planner_factory(project)
+        self._secrets: list[ResolvedSecret] = []
+
+    @property
+    def secret_plan(self) -> SecretPlan:
+        """The agent's built-in secrets, overridden by the spec's [secrets] (spec §10.2)."""
+        return SecretPlan(self._agent.secrets, user_declarations(self._spec.secrets))
+
+    def session_environment(self) -> dict[str, str]:
+        """Secret env vars for one session, as resolved by the last :meth:`ensure`."""
+        return self._services.secret_deliveries.session_environment(self._secrets)
 
     @property
     def workdir(self) -> Path:
@@ -102,7 +119,7 @@ class BoxOrchestrator:
             str(path)
             for path in (*self._planner.checkout_roots(self._spec), *self._project.worktrees)
         )
-        return BoxContext(self._services.environment.build(self._agent), tuple(dirs))
+        return BoxContext(dict(self._agent.environment), tuple(dirs))
 
     # ---- sessions ----------------------------------------------------------------------
 
@@ -111,6 +128,8 @@ class BoxOrchestrator:
         network = self._spec.network
         policy = NetworkPolicy.parse(network.default, network.allow, network.deny)
         self._spec.box.idle_timeout_seconds()  # Fail early on a malformed timeout.
+        # Read secrets on the host first: a missing one stops the run before anything starts.
+        self._secrets = self.secret_plan.resolve(self._services.secret_readers)
         self._observer.building_image(self._spec)
         box_image = self._services.images.build(self._spec, self._agent)
         gateway_image = self._services.gateway_images.build()
@@ -123,6 +142,8 @@ class BoxOrchestrator:
             plan = self._services.planner.plan(observation, spec_hash)
             box = self._apply(plan, observation, policy, box_image, gateway_image, spec_hash)
             self._check_late_worktree(plan)
+            # Files are (re)written on every attach so rotated values are picked up.
+            self._services.secret_deliveries.write_files(self._secrets, box.handle)
             return box
 
     def release(self) -> None:

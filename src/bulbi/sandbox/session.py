@@ -58,4 +58,5 @@ class SandboxSession:
             command,
             workdir=str(self._orchestrator.workdir),
             environment=SESSION_ENVIRONMENT,
+            secret_environment=self._orchestrator.session_environment(),
         )

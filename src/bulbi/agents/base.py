@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from bulbi.agents.ports import BoxContext, ContainerHandle
+from bulbi.secrets.model import SecretDeclaration
 
 
 class Agent(ABC):
@@ -26,8 +27,9 @@ class Agent(ABC):
     install_commands: tuple[str, ...] = ()
     #: Environment variables baked into the image and set on the container.
     environment: Mapping[str, str] = MappingProxyType({})
-    #: Host environment variables forwarded to the container when set.
-    api_key_vars: tuple[str, ...] = ()
+    #: Built-in secrets (e.g. API keys, OAuth files); a user's [secrets] entry with the
+    #: same name overrides one (spec §10.2).
+    secrets: tuple[SecretDeclaration, ...] = ()
     #: Domains the agent needs; suggested in the starter spec's allowlist.
     domains: tuple[str, ...] = ()
 
@@ -40,10 +42,6 @@ class Agent(ABC):
     @abstractmethod
     def launch_command(self) -> tuple[str, ...]:
         """Command ``bulbi run`` executes when no explicit command is given."""
-
-    def api_keys_from(self, host_env: Mapping[str, str]) -> dict[str, str]:
-        """The subset of :attr:`api_key_vars` that is set (non-empty) on the host."""
-        return {var: host_env[var] for var in self.api_key_vars if host_env.get(var)}
 
     def prepare_container(  # noqa: B027 - optional hook, intentionally a no-op by default
         self, container: ContainerHandle, context: BoxContext

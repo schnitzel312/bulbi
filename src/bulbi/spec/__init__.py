@@ -15,6 +15,7 @@ from bulbi.spec.models import (
     ProjectSpec,
     SecretSource,
     SecretSpec,
+    SecretTarget,
     SetupSpec,
     ToolsSpec,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "PyprojectSource",
     "SecretSource",
     "SecretSpec",
+    "SecretTarget",
     "SetupSpec",
     "SpecLoader",
     "SpecParser",

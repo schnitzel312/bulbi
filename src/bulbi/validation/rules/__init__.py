@@ -20,7 +20,7 @@ from bulbi.validation.rules.network import (
     WidePrivateRangeRule,
 )
 from bulbi.validation.rules.profiles import ProfilesNarrowRule
-from bulbi.validation.rules.secrets import SecretHostsRule, SecretSourceRule
+from bulbi.validation.rules.secrets import SecretHostsRule, SecretSourceRule, SecretTargetRule
 from bulbi.validation.rules.tools import InterpreterToolsRule, KnownToolsRule
 
 __all__ = [
@@ -40,6 +40,7 @@ __all__ = [
     "RuleSyntaxRule",
     "SecretHostsRule",
     "SecretSourceRule",
+    "SecretTargetRule",
     "WidePrivateRangeRule",
     "WorktreeDirsRule",
     "WritableMountRule",

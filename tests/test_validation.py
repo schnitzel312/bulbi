@@ -84,17 +84,18 @@ def test_profile_widens_tools():
     assert "not in root" in result.errors[0]
 
 
-def test_secret_no_hosts_warning():
-    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=[])})
-    result = validate_spec(spec)
-    assert any("no host restriction" in w for w in result.warnings)
+def test_secret_hosts_key_is_ignored_with_a_warning():
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=["api.x"])})
+    (warning,) = [w for w in validate_spec(spec).warnings if "secret" in w]
+    assert "'hosts' is ignored until to = 'inject'" in warning
+    assert validate_spec(_make_spec(secrets={"KEY": SecretSpec(from_source="env")})).ok
 
 
 def test_errors_and_warnings_are_reported_in_rule_order():
     spec = _make_spec(
         tools=ToolsSpec(allow=["nonexistent", "python"]),
         mounts=[],
-        secrets={"KEY": SecretSpec(from_source="vault", hosts=[])},
+        secrets={"KEY": SecretSpec(from_source="vault", hosts=["a"])},
     )
     result = validate_spec(spec)
     assert [e.split(":")[0] for e in result.errors] == ["unknown tool", "secret 'KEY'"]
@@ -159,11 +160,10 @@ def test_profile_widening_network_default_is_an_error():
     ]
 
 
-def test_secret_warning_does_not_claim_the_secret_is_injected():
-    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=[])})
+def test_secret_warning_does_not_claim_the_secret_is_protected():
+    spec = _make_spec(secrets={"KEY": SecretSpec(from_source="env", hosts=["api.x"])})
     (warning,) = [w for w in validate_spec(spec).warnings if "secret" in w]
-    assert "not implemented" in warning
-    assert "available to all proxied requests" not in warning
+    assert "the agent can read this secret" in warning
 
 
 @pytest.mark.parametrize("source", ["vault", ["env"], {"x": 1}, 7])
@@ -172,7 +172,9 @@ def test_unknown_secret_source_is_kept_for_the_rule_to_report(source):
 
     assert SecretSpec(from_source="env").from_source is SecretSource.ENV
     spec = _make_spec(secrets={"KEY": SecretSpec(from_source=source, hosts=["a"])})
-    assert validate_spec(spec).errors == ["secret 'KEY': only 'env' source is supported in v1"]
+    (error,) = validate_spec(spec).errors
+    assert error.startswith("secret 'KEY': unknown from ")
+    assert error.endswith("(use env, file, keychain, command)")
 
 
 def test_non_string_secret_source_from_toml_is_a_validation_error(tmp_path):
@@ -182,7 +184,9 @@ def test_non_string_secret_source_from_toml_is_a_validation_error(tmp_path):
         'spec = "0.1"\n[box]\nname = "x"\n[secrets]\nK = { from = ["env"], hosts = ["a"] }\n'
     )
     result = validate_spec(SpecLoader().load(tmp_path))
-    assert result.errors == ["secret 'K': only 'env' source is supported in v1"]
+    assert result.errors == [
+        "secret 'K': unknown from '['env']' (use env, file, keychain, command)"
+    ]
 
 
 # ---- Network rules (sandbox isolation spec §5) ---------------------------------------

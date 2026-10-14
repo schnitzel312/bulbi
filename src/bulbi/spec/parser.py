@@ -22,8 +22,8 @@ from bulbi.spec.models import (
     NetworkSpec,
     ProfileSpec,
     ProjectSpec,
-    SecretSource,
     SecretSpec,
+    SecretTarget,
     SetupSpec,
     ToolsSpec,
 )
@@ -103,7 +103,10 @@ class SpecParser:
     @staticmethod
     def _parse_secret(raw: RawTable) -> SecretSpec:
         return SecretSpec(
-            from_source=raw.get("from", SecretSource.ENV),
+            from_source=raw.get("from"),
+            source=raw.get("source"),
+            to=raw.get("to", SecretTarget.ENV),
+            path=raw.get("path"),
             hosts=list(raw.get("hosts", [])),
         )
 

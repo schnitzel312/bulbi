@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich.console import Console
 from rich.table import Table
 
@@ -14,10 +16,15 @@ from bulbi.cli.render.styles import (
     styled,
 )
 from bulbi.cli.render.validation import ValidationRenderer
+from bulbi.secrets import SecretStatus
 from bulbi.spec import BulbiSpec
 from bulbi.validation import ValidationResult
 
 NOT_SET = "-"
+SECRETS_THREAT_MODEL = (
+    "The agent can read every secret it is given; the network policy limits where it can "
+    "send them. Values are never shown or logged."
+)
 
 
 class SpecReportRenderer:
@@ -26,7 +33,12 @@ class SpecReportRenderer:
     def __init__(self, console: Console) -> None:
         self._console = console
 
-    def render(self, spec: BulbiSpec, result: ValidationResult) -> None:
+    def render(
+        self,
+        spec: BulbiSpec,
+        result: ValidationResult,
+        secrets: Sequence[SecretStatus] = (),
+    ) -> None:
         self._console.print(f"\n[bold]Box:[/bold] {spec.box.name}  (agent: {spec.box.agent})\n")
         self._console.print(self._tools_table(spec))
         self._console.print(self._mounts_table(spec))
@@ -38,6 +50,9 @@ class SpecReportRenderer:
         if spec.profiles:
             self._console.print(self._profiles_table(spec))
         self._console.print(self._limits_table(spec))
+        if secrets:
+            self._console.print(self._secrets_table(secrets))
+            self._console.print(f"[dim]{SECRETS_THREAT_MODEL}[/dim]")
         ValidationRenderer(self._console).render(result)
         self._console.print()
 
@@ -88,6 +103,26 @@ class SpecReportRenderer:
                 else NOT_SET
             )
             table.add_row(name, tools, network)
+        return table
+
+    @staticmethod
+    def _secrets_table(secrets: Sequence[SecretStatus]) -> Table:
+        table = Table(title="Secrets entering the box")
+        table.add_column("Name", style="cyan")
+        table.add_column("From")
+        table.add_column("To")
+        table.add_column("Available")
+        for status in secrets:
+            declaration = status.declaration
+            name = declaration.name + (" (built-in)" if declaration.builtin else "")
+            available = (
+                styled("✓", ALLOWED_STYLE)
+                if status.available
+                else styled("✗" if not declaration.optional else "✗ (optional)", CAUTION_STYLE)
+            )
+            table.add_row(
+                name, declaration.describe_source(), declaration.describe_target(), available
+            )
         return table
 
     @staticmethod

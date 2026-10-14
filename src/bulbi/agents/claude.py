@@ -9,17 +9,18 @@ from types import MappingProxyType
 from typing import Any
 
 from bulbi.agents.base import Agent
-from bulbi.agents.credentials import CredentialProvider, KeychainCredentialProvider
 from bulbi.agents.ports import BoxContext, ContainerHandle
 from bulbi.constants import CONTAINER_HOME
+from bulbi.secrets.model import SecretDeclaration
+from bulbi.spec import SecretSource, SecretTarget
 
 API_KEY_VAR = "ANTHROPIC_API_KEY"
+OAUTH_SECRET = "CLAUDE_OAUTH"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 USER_CONFIG_FILE = ".claude.json"
 SETTINGS_FILE = ".claude/settings.json"
-CREDENTIALS_FILE = ".claude/.credentials.json"
-CREDENTIALS_FILE_MODE = 0o600
+CREDENTIALS_FILE = "~/.claude/.credentials.json"
 
 # Large enough that Claude Code treats onboarding, tips and migrations as done.
 _SEEN_EVERYTHING_COUNT = 9999
@@ -31,10 +32,11 @@ JsonObject = dict[str, Any]
 class ClaudeAgent(Agent):
     """Anthropic's Claude Code CLI.
 
-    Before launch it writes three files so Claude Code starts without prompts:
-    ``~/.claude.json`` (onboarding and workspace trust), ``~/.claude/settings.json``
-    (skip the dangerous-mode prompt) and, when no API key is forwarded,
-    ``~/.claude/.credentials.json`` with the host's subscription OAuth tokens.
+    Before launch it writes ``~/.claude.json`` (onboarding, trust for the project's
+    checkouts) and ``~/.claude/settings.json`` (skip the dangerous-mode prompt), so
+    Claude Code starts without prompts. Credentials are secrets (spec §10.2): the
+    ``ANTHROPIC_API_KEY`` env var, or else the host's subscription OAuth tokens from
+    the macOS Keychain, written to ``~/.claude/.credentials.json``.
     """
 
     name = "claude"
@@ -47,7 +49,19 @@ class ClaudeAgent(Agent):
             "CLAUDE_CODE_NO_FLICKER": "1",
         }
     )
-    api_key_vars = (API_KEY_VAR,)
+    secrets = (
+        SecretDeclaration(API_KEY_VAR, SecretSource.ENV, API_KEY_VAR, optional=True, builtin=True),
+        SecretDeclaration(
+            OAUTH_SECRET,
+            SecretSource.KEYCHAIN,
+            KEYCHAIN_SERVICE,
+            target=SecretTarget.FILE,
+            path=CREDENTIALS_FILE,
+            optional=True,
+            skip_if_present=(API_KEY_VAR,),
+            builtin=True,
+        ),
+    )
     domains = (
         "api.anthropic.com",
         "platform.claude.com",
@@ -58,12 +72,7 @@ class ClaudeAgent(Agent):
         "statsig.com",
     )
 
-    def __init__(
-        self,
-        credentials: CredentialProvider | None = None,
-        host_home: Path | None = None,
-    ) -> None:
-        self._credentials = credentials or KeychainCredentialProvider.for_host(KEYCHAIN_SERVICE)
+    def __init__(self, host_home: Path | None = None) -> None:
         self._host_home = host_home
 
     def prepare_container(self, container: ContainerHandle, context: BoxContext) -> None:
@@ -74,13 +83,9 @@ class ClaudeAgent(Agent):
                 self._user_config(self._installed_version(container), context.project_dirs)
             ),
         )
-        if API_KEY_VAR not in context.environment:
-            self._write_credentials(container)
 
     def refresh(self, container: ContainerHandle, context: BoxContext) -> None:
-        """Renew credentials and trust newly seen checkouts; nothing else is touched."""
-        if API_KEY_VAR not in context.environment:
-            self._write_credentials(container)
+        """Trust newly seen checkouts; nothing else is touched (secrets refresh themselves)."""
         self._trust_new_dirs(container, context.project_dirs)
 
     def _settings(self) -> JsonObject:
@@ -123,13 +128,6 @@ class ClaudeAgent(Agent):
         result = container.exec(["claude", "--version"])
         words = result.output.split()
         return words[0] if result.succeeded and words else None
-
-    def _write_credentials(self, container: ContainerHandle) -> None:
-        credentials = self._credentials.read()
-        if credentials:
-            container.write_file(
-                _in_container_home(CREDENTIALS_FILE), credentials, mode=CREDENTIALS_FILE_MODE
-            )
 
     def _read_host_json(self, relative_path: str) -> JsonObject:
         """Read a JSON object from the host home; missing or malformed files count as empty."""
