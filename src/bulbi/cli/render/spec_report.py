@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from rich.console import Console
 from rich.table import Table
 
+from bulbi.cli.render.git_safety import describe_git
 from bulbi.cli.render.policy import SHARED_IP_NOTE, PolicyDescriber
 from bulbi.cli.render.styles import (
     ALLOWED_STYLE,
@@ -54,6 +55,8 @@ class SpecReportRenderer:
         if spec.profiles:
             self._console.print(self._profiles_table(spec))
         self._console.print(self._limits_table(spec))
+        self._console.print(self._git_table(spec))
+        self._console.print(f"[dim]{describe_git(spec.git)}[/dim]")
         if secrets:
             self._console.print(self._secrets_table(secrets))
             self._console.print(f"[dim]{SECRETS_THREAT_MODEL}[/dim]")
@@ -131,6 +134,17 @@ class SpecReportRenderer:
             table.add_row(
                 name, declaration.describe_source(), declaration.describe_target(), available
             )
+        return table
+
+    @staticmethod
+    def _git_table(spec: BulbiSpec) -> Table:
+        table = Table(title="Git safety")
+        table.add_column("Setting", style="bold")
+        table.add_column("Value")
+        table.add_row("Mode", spec.git.mode)
+        table.add_row("On finding", spec.git.on_finding)
+        table.add_row("Scan budget", spec.git.scan_budget)
+        table.add_row("Not scanned", ", ".join(spec.git.skip) or EMPTY_CELL)
         return table
 
     @staticmethod

@@ -6,6 +6,8 @@ from collections.abc import Sequence
 
 from rich.console import Console
 
+from bulbi.cli.render.git_safety import GitReportRenderer
+from bulbi.gitsafety.guard import GitSafetyReport
 from bulbi.sandbox import SandboxObserver
 from bulbi.spec import BulbiSpec
 
@@ -27,3 +29,6 @@ class ConsoleSandboxObserver(SandboxObserver):
 
     def running(self, label: str, command: Sequence[str]) -> None:
         self._console.print(f"[bold]{label}:[/bold] {' '.join(command)}")
+
+    def git_report(self, report: GitSafetyReport) -> None:
+        GitReportRenderer(self._console).render(report)

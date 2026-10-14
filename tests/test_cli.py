@@ -633,3 +633,101 @@ def test_check_probe_secrets_resolves_everything(cli: Harness):
     assert _reads(cli, "command") == ["op read op://dev/npm"]
     assert "sentry-dsn" in _reads(cli, "keychain")
     assert "resolved at run" not in result.output
+
+
+# ---- git safety (docs/specs/git-safety.md) ------------------------------------------------
+
+
+@pytest.fixture
+def repo_cli(tmp_path: Path) -> Harness:
+    from tests.repos import make_repo
+
+    harness = Harness(make_repo(tmp_path / "app"))
+    harness.write_spec()
+    return harness
+
+
+def _plant(root: Path) -> Path:
+    from tests.repos import make_repo
+
+    nested = make_repo(root / "src")
+    (nested / ".git" / "config").write_text("[core]\n\tfsmonitor = /tmp/pwn.sh\n")
+    return nested
+
+
+class PlantingRunner(RecordingRunner):
+    """A session whose agent plants a nested repository (vector C)."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def __call__(self, argv, env=None):
+        _plant(self.root)
+        return super().__call__(argv, env)
+
+
+def test_help_lists_the_git_commands(cli: Harness):
+    output = cli.invoke("--help").output
+    for name in ("git-scan", "git-restore", "pull"):
+        assert f"  {name} " in output
+
+
+def test_session_end_quarantines_and_explains_how_to_restore(repo_cli: Harness):
+    repo_cli.runner = PlantingRunner(repo_cli.project_root)
+    result = repo_cli.invoke("run")
+    nested_git = repo_cli.project_root / "src" / ".git"
+    assert result.exit_code == 0, result.output
+    assert "Git safety: 1 change(s)" in result.output
+    assert str(nested_git) in result.output
+    assert "new_git_dir" in result.output and "moved to" in result.output
+    assert "bulbi git-restore " in result.output
+    assert not nested_git.exists()
+
+
+def test_git_scan_without_a_box_has_nothing_to_compare(repo_cli: Harness):
+    result = repo_cli.invoke("git-scan")
+    assert result.exit_code == 0
+    assert "No git baseline yet" in result.output
+
+
+def test_git_scan_then_restore(repo_cli: Harness):
+    assert repo_cli.invoke("run").exit_code == 0
+    assert "No dangerous git metadata found" in repo_cli.invoke("git-scan").output
+    nested = _plant(repo_cli.project_root)
+    result = repo_cli.invoke("git-scan")
+    assert result.exit_code == 0 and not (nested / ".git").exists()
+    record_id = result.output.split("bulbi git-restore ")[1].split()[0]
+
+    listing = repo_cli.invoke("git-restore")
+    assert record_id in listing.output and "quarantined" in listing.output
+
+    restored = repo_cli.invoke("git-restore", record_id)
+    assert restored.exit_code == 0, restored.output
+    assert f"Restored {nested / '.git'}" in restored.output
+    assert (nested / ".git").is_dir()
+    assert "No dangerous git metadata found" in repo_cli.invoke("git-scan").output
+
+
+def test_git_scan_in_block_mode_exits_1_and_run_refuses(repo_cli: Harness):
+    repo_cli.write_spec(SPEC + '\n[git]\non_finding = "block"\n')
+    assert repo_cli.invoke("run").exit_code == 0
+    nested = _plant(repo_cli.project_root)
+    assert repo_cli.invoke("git-scan").exit_code == 1
+    result = repo_cli.invoke("run")
+    assert result.exit_code == 1
+    assert "refusing to attach" in result.output
+    assert (nested / ".git").is_dir()
+
+
+def test_pull_needs_isolated_mode(repo_cli: Harness):
+    result = repo_cli.invoke("pull")
+    assert result.exit_code == 1
+    assert 'needs [git] mode = "isolated"' in result.output
+
+
+def test_check_explains_git_safety(cli: Harness):
+    cli.write_spec()
+    result = cli.invoke("check")
+    assert "Git safety" in result.output and "guarded" in result.output
+    assert "bulbi git-scan" in result.output

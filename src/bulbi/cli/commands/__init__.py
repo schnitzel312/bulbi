@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from bulbi.cli.commands.base import BulbiCommand
 from bulbi.cli.commands.check import CheckCommand
+from bulbi.cli.commands.git_restore import GitRestoreCommand
+from bulbi.cli.commands.git_scan import GitScanCommand
 from bulbi.cli.commands.init import InitCommand
 from bulbi.cli.commands.log import LogCommand
 from bulbi.cli.commands.ls import ListCommand
+from bulbi.cli.commands.pull import PullCommand
 from bulbi.cli.commands.reset import ResetCommand
 from bulbi.cli.commands.restart import RestartCommand
 from bulbi.cli.commands.rm import RemoveCommand
@@ -21,6 +24,9 @@ COMMANDS: tuple[BulbiCommand, ...] = (
     RunCommand(),
     ShellCommand(),
     LogCommand(),
+    GitScanCommand(),
+    GitRestoreCommand(),
+    PullCommand(),
     ListCommand(),
     StopCommand(),
     RestartCommand(),
