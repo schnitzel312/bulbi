@@ -272,7 +272,18 @@ def test_host_header_spoof_is_denied_and_logged_with_real_target(
 
 
 @pytest.mark.parametrize(
-    "url", ["file:///etc/passwd", "ftp://allowed.test/x", "https://allowed.test/", "/relative"]
+    "url",
+    [
+        "file:///etc/passwd",
+        "ftp://allowed.test/x",
+        "https://allowed.test/",
+        "/relative",
+        # Userinfo makes the policy's host and urllib's connect host disagree.
+        "http://evil.test\\@allowed.test/",
+        "http://evil.test%2f@allowed.test/",
+        "http://evil.test;@allowed.test/",
+        "http://user:pass@allowed.test/",
+    ],
 )
 def test_non_http_or_relative_targets_are_denied(log_path: Path, url: str):
     proxy = _start(AllowlistPolicy(["allowed.test"]), log_path)
@@ -354,3 +365,15 @@ def test_unreachable_upstream_is_a_502(log_path: Path):
 
 def test_allowlist_matching_ignores_case():
     assert AllowlistPolicy(["Example.COM"]).allows("example.com")
+
+
+def test_upstream_opener_has_no_file_ftp_or_data_handlers():
+    from bulbi.proxy.handler import _UPSTREAM_OPENER
+
+    schemes = {
+        name.removesuffix("_open")
+        for handler in _UPSTREAM_OPENER.handlers
+        for name in dir(handler)
+        if name.endswith("_open") and name not in {"default_open", "unknown_open", "do_open"}
+    }
+    assert schemes == {"http"}

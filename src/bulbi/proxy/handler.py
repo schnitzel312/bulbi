@@ -11,7 +11,14 @@ from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, cast
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, OpenerDirector, ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    HTTPHandler,
+    HTTPRedirectHandler,
+    OpenerDirector,
+    Request,
+)
 
 from bulbi.proxy.audit import AuditAction
 
@@ -26,6 +33,7 @@ DEFAULT_TLS_PORT = 443
 UNKNOWN_DOMAIN = "(unknown)"
 DENIED_MESSAGE = "Domain not in allowlist"
 HTTP_SCHEME = "http"
+_AMBIGUOUS_NETLOC_CHARS = ("@", "\\")
 
 # Headers that apply to a single connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -58,8 +66,25 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         return None
 
 
-# Ignores the host's own proxy environment variables and never follows redirects.
-_UPSTREAM_OPENER: OpenerDirector = build_opener(ProxyHandler({}), _NoRedirectHandler())
+def _build_upstream_opener() -> OpenerDirector:
+    """An opener that can only speak plain HTTP.
+
+    Built by hand rather than with ``build_opener`` so that no file/ftp/data handler and
+    no ``ProxyHandler`` (which would honour the host's proxy variables) exist at all, and
+    redirects are handed back to the client instead of being followed.
+    """
+    opener = OpenerDirector()
+    for handler in (
+        HTTPHandler(),
+        HTTPDefaultErrorHandler(),
+        _NoRedirectHandler(),
+        HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+_UPSTREAM_OPENER = _build_upstream_opener()
 
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
@@ -160,11 +185,15 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         """The host the request would actually be sent to, and whether it may be sent.
 
         Only absolute ``http://`` URLs are forwarded, and a ``Host`` header, when present,
-        must name the same host; the policy is applied to the URL's own host.
+        must name the same host; the policy is applied to the URL's own host. URLs with
+        userinfo (``@``) or backslashes are refused: there, the host urllib connects to can
+        differ from the ``hostname`` the policy sees.
         """
         url = urlsplit(self.path)
         target = (url.hostname or "").lower()
         if url.scheme != HTTP_SCHEME or not target:
+            return target, False
+        if any(char in url.netloc for char in _AMBIGUOUS_NETLOC_CHARS):
             return target, False
         host_header = self.headers.get("Host")
         if host_header and host_without_port(host_header).lower() != target:
