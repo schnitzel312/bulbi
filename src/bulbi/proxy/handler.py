@@ -52,7 +52,7 @@ def host_without_port(host: str) -> str:
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     """Applies the domain policy to each request, audits it, then forwards it."""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+    def log_message(self, format: str, *args: Any) -> None:
         """Silence the default stderr access log; the audit log replaces it."""
 
     @property
@@ -70,7 +70,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     # ---- CONNECT (HTTPS tunnelling) ---------------------------------------
 
-    def do_CONNECT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler naming
+    def do_CONNECT(self) -> None:
         if not self._admit(host_without_port(self.path), "CONNECT", self.path):
             return
         target = self._connect_target()
@@ -123,7 +123,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if not self._admit(self._request_domain(), method, self.path):
             return
         try:
-            with urlopen(self._upstream_request(method), timeout=UPSTREAM_TIMEOUT_SECONDS) as resp:  # noqa: S310
+            with urlopen(self._upstream_request(method), timeout=UPSTREAM_TIMEOUT_SECONDS) as resp:
                 status, headers, body = resp.status, resp.getheaders(), resp.read()
         except (OSError, ValueError, HTTPException) as exc:
             # urllib's HTTPError (an OSError) means upstream answered with an error status.

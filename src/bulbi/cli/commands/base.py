@@ -36,7 +36,7 @@ class BulbiCommand(ABC):
         """Build the Click command; any :class:`BulbiError` becomes a clean CLI error."""
 
         @click.pass_obj
-        def callback(app: AppContext, **options: Any) -> None:
+        def callback(app: AppContext, /, **options: Any) -> None:
             try:
                 self.execute(app, **options)
             except BulbiError as exc:

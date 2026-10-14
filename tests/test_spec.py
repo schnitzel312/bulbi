@@ -140,7 +140,7 @@ def test_unknown_profile(sample_toml: Path):
 
 
 def test_missing_spec_file(tmp_path: Path):
-    with pytest.raises(SpecError, match="no bulbi.toml"):
+    with pytest.raises(SpecError, match=r"no bulbi\.toml"):
         SpecLoader().load(tmp_path)
 
 
@@ -154,7 +154,7 @@ def test_missing_box_name(tmp_path: Path):
         allow = ["git"]
     """)
     )
-    with pytest.raises(SpecError, match="box.name is required"):
+    with pytest.raises(SpecError, match=r"box\.name is required"):
         SpecLoader().load(tmp_path)
 
 
@@ -205,7 +205,7 @@ def test_bulbi_toml_takes_precedence_over_pyproject(tmp_path: Path):
 
 def test_pyproject_without_bulbi_table_is_not_a_spec(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
-    with pytest.raises(SpecError, match="no bulbi.toml"):
+    with pytest.raises(SpecError, match=r"no bulbi\.toml"):
         SpecLoader().load(tmp_path)
 
 
@@ -232,14 +232,14 @@ def test_parser_rejects_unsupported_version():
 def test_parser_rejects_invalid_network_default():
     from bulbi.spec import SpecParser
 
-    with pytest.raises(SpecError, match="network.default must be 'deny' or 'allow'"):
+    with pytest.raises(SpecError, match=r"network\.default must be 'deny' or 'allow'"):
         SpecParser().parse({"box": {"name": "x"}, "network": {"default": "maybe"}})
 
 
 def test_parser_requires_mount_path():
     from bulbi.spec import SpecParser
 
-    with pytest.raises(SpecError, match="mount.path is required"):
+    with pytest.raises(SpecError, match=r"mount\.path is required"):
         SpecParser().parse({"box": {"name": "x"}, "mount": [{"mode": "read-only"}]})
 
 

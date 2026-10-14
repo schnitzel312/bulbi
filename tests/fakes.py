@@ -98,7 +98,7 @@ class FakeContainers:
             raise docker.errors.NotFound(f"No such container: {key}")
         return container
 
-    def list(self, all: bool, filters: dict) -> list[FakeContainer]:  # noqa: A002
+    def list(self, all: bool, filters: dict) -> list[FakeContainer]:
         unique = {id(c): c for c in self.by_key.values() if not c.removed}
         return list(unique.values())
 

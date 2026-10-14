@@ -34,7 +34,7 @@ class AppContext:
     tested with fakes. The Docker client is created lazily, on first use.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only injection points with defaults
         self,
         *,
         project_root: Path,

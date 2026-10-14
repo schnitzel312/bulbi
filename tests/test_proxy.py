@@ -1,5 +1,6 @@
 """Tests for the allowlist proxy."""
 
+import contextlib
 import http.client
 import http.server
 import json
@@ -71,10 +72,8 @@ def test_proxy_log_format(proxy: ProxyServer, log_path: Path):
     handler = urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"})
     opener = urllib.request.build_opener(handler)
 
-    try:
+    with contextlib.suppress(urllib.error.HTTPError):
         opener.open(req, timeout=5)
-    except urllib.error.HTTPError:
-        pass
 
     assert log_path.exists()
     lines = log_path.read_text().strip().splitlines()
@@ -91,7 +90,7 @@ def test_proxy_log_format(proxy: ProxyServer, log_path: Path):
 
 
 class _HelloHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         body = b"hello"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))

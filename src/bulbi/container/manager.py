@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -119,10 +119,8 @@ class BoxManager:
                 self._docker.images.remove(image.id, force=True)
 
     def _remove_if_present(self, name: str) -> None:
-        try:
+        with suppress(docker.errors.NotFound):
             self._docker.containers.get(name).remove(force=True)
-        except docker.errors.NotFound:
-            pass
 
     @staticmethod
     def _resource_limits(limits: LimitsSpec) -> dict[str, int]:
