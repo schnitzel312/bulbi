@@ -121,9 +121,10 @@ def check() -> None:
     console.print(limits_table)
 
     # Validation -----------------------------------------------------------
-    from bulbi.validate import validate_spec
+    from bulbi.tools import ToolRegistry
+    from bulbi.validation import SpecValidator
 
-    result = validate_spec(spec)
+    result = SpecValidator.default(ToolRegistry.builtin()).validate(spec)
 
     if result.errors:
         console.print("\n[bold red]Errors:[/bold red]")

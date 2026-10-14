@@ -11,7 +11,10 @@ from bulbi.spec import (
     SetupSpec,
     ToolsSpec,
 )
-from bulbi.validate import validate_spec
+from bulbi.tools import ToolRegistry
+from bulbi.validation import SpecValidator
+
+validate_spec = SpecValidator.default(ToolRegistry.builtin()).validate
 
 
 def _make_spec(**overrides) -> BulbiSpec:
@@ -87,3 +90,57 @@ def test_secret_no_hosts_warning():
     )
     result = validate_spec(spec)
     assert any("no host restriction" in w for w in result.warnings)
+
+
+def test_errors_and_warnings_are_reported_in_rule_order():
+    spec = _make_spec(
+        tools=ToolsSpec(allow=["nonexistent", "python"]),
+        mounts=[],
+        secrets={"KEY": SecretSpec(from_source="vault", hosts=[])},
+    )
+    result = validate_spec(spec)
+    assert [e.split(":")[0] for e in result.errors] == ["unknown tool", "secret 'KEY'"]
+    assert [w.split(" ")[0] for w in result.warnings] == ["no", "secret", "interpreters"]
+
+
+def test_invalid_tool_reference_is_an_error_not_a_crash():
+    result = validate_spec(_make_spec(tools=ToolsSpec(allow=["123bad"])))
+    assert result.errors == ["invalid tool spec: '123bad'"]
+
+
+def test_empty_allowlist_warning():
+    result = validate_spec(_make_spec(network=NetworkSpec(default="deny", allow=[])))
+    assert any("allowlist is empty" in w for w in result.warnings)
+
+
+def test_profile_widening_read_only_mount_is_an_error():
+    spec = _make_spec(
+        mounts=[MountSpec(path=".", mode="read-only")],
+        profiles={"rw": ProfileSpec(mounts={".": "read-write"})},
+    )
+    result = validate_spec(spec)
+    assert result.errors == ["profile 'rw' widens mount '.' from read-only to read-write"]
+
+
+def test_profile_unknown_mount_and_domains_are_all_reported():
+    spec = _make_spec(
+        profiles={
+            "bad": ProfileSpec(network=NetworkSpec(allow=["x.com"]), mounts={"/y": "read-only"})
+        }
+    )
+    assert validate_spec(spec).errors == [
+        "profile 'bad' widens network: ['x.com'] not in root",
+        "profile 'bad' adds mount '/y' not in root",
+    ]
+
+
+def test_validator_runs_only_given_rules():
+    from bulbi.validation import ValidationIssue, ValidationRule
+
+    class AlwaysWarn(ValidationRule):
+        def check(self, spec):
+            yield ValidationIssue.warning(f"box {spec.box.name}")
+
+    result = SpecValidator([AlwaysWarn()]).validate(_make_spec(mounts=[]))
+    assert result.ok
+    assert result.warnings == ["box test"]
