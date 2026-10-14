@@ -843,3 +843,12 @@ def test_connection_attempts_are_audited_with_name_and_rule(tmp_path):
         "allowed_by_dns",
     )
     assert (second.domain, second.rule, second.port) == ("10.0.0.5", "10.0.0.0/24:5432", 5432)
+
+
+def test_redirected_dns_is_accepted_before_the_protected_ranges():
+    """Found with nft tracing: after `redirect`, egress still sees oif eth0 and daddr
+    127.0.0.1, so without this rule DNS sent to any external resolver was refused."""
+    rendered = NftablesBackend().render(NetworkPolicy.parse("deny", []), CONTEXT)
+    accept = "meta l4proto { tcp, udp } ip daddr 127.0.0.1 th dport 5353 accept"
+    assert accept in rendered
+    assert rendered.index(accept) < rendered.index("127.0.0.0/8")

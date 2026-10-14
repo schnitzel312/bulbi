@@ -29,6 +29,7 @@ from bulbi.gateway.rules import (
 DOCKER_EMBEDDED_DNS = "127.0.0.11"
 DNS_PORT = 53
 RESOLVER_PORT = 5353
+RESOLVER_HOST = "127.0.0.1"
 LOG_GROUP = 1
 LOG_PREFIX = "bulbi"
 LOG_FIELD_SEPARATOR = "|"
@@ -186,6 +187,12 @@ class NftablesBackend(FirewallBackend):
         out.add("chain egress {", 1)
         out.add("type filter hook output priority 0; policy drop;", 2)
         out.add("ct state established,related accept", 2)
+        out.add("# DNS redirected to the resolver (still routed via eth0 at this point).", 2)
+        out.add(
+            f"meta l4proto {{ tcp, udp }} ip daddr {RESOLVER_HOST} "
+            f"th dport {context.resolver_port} accept",
+            2,
+        )
         out.add("# The resolver may only reach Docker's DNS; nothing else is exempt.", 2)
         out.add(f"meta skuid {context.resolver_uid} ip daddr {DOCKER_EMBEDDED_DNS} accept", 2)
         out.add(f"meta skuid {context.resolver_uid} goto refuse", 2)

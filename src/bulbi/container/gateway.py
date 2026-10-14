@@ -140,6 +140,10 @@ class GatewayManager:
                 security_opt=["no-new-privileges"],
                 read_only=True,
                 tmpfs={READY_DIR: "size=64k"},
+                # DNS sent to any resolver is redirected to the loopback resolver; the kernel
+                # only routes such rewritten eth0 packets to 127.0.0.1 with route_localnet.
+                # New inbound connections stay dropped by the ingress chain.
+                sysctls={"net.ipv4.conf.all.route_localnet": "1"},
                 pids_limit=_GATEWAY_PIDS_LIMIT,
                 mem_limit=_GATEWAY_MEMORY,
                 init=True,

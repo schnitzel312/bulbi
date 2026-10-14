@@ -627,3 +627,10 @@ def test_env_secrets_reach_the_session_without_appearing_in_arguments(tmp_path, 
         kw for _, kw in services.boxes._docker.containers.run_calls if "network_mode" in kw
     ]
     assert "GITHUB_TOKEN" not in box_kwargs[0]["environment"]  # never baked into the container
+
+
+def test_gateway_can_redirect_dns_sent_to_any_resolver(tmp_path, client, services):
+    """Redirecting eth0-bound DNS to the loopback resolver needs route_localnet."""
+    _orchestrator(Project.plain(tmp_path), services).ensure()
+    gateway, _ = _run_kwargs(client)
+    assert gateway["sysctls"] == {"net.ipv4.conf.all.route_localnet": "1"}

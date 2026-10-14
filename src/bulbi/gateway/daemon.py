@@ -31,6 +31,7 @@ from bulbi.gateway.config import (
 )
 from bulbi.gateway.firewall import (
     LOG_GROUP,
+    RESOLVER_HOST,
     RESOLVER_PORT,
     FirewallContext,
     NftablesBackend,
@@ -44,7 +45,6 @@ from bulbi.gateway.supervisor import FirewallLoader, PipeSink, Supervisor
 
 logger = logging.getLogger("bulbi.gateway")
 
-RESOLVER_HOST = "127.0.0.1"
 _SOCKET_BACKLOG = 64
 
 

@@ -50,3 +50,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Real-Docker suites run only with `pytest -m docker`.
+addopts = "-m 'not docker'"
+markers = ["docker: needs a running Docker daemon and internet access (run with -m docker)"]
