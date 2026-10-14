@@ -265,6 +265,27 @@ def test_symlinked_git_entry_is_a_finding(repo, tmp_path):
     assert not (repo / "src" / ".git").is_symlink()
 
 
+def test_bare_repository_shaped_directory_is_quarantined(repo, tmp_path):
+    """git treats a directory with HEAD, objects/ and refs/ as a repository when run
+    inside it, so an agent need not even name it .git."""
+    guard = _start_box(_project(repo))
+    marker = tmp_path / "PWNED"
+    bare = repo / "assets"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    git(bare, "config", "core.bare", "false")
+    git(bare, "config", "core.worktree", str(repo))
+    git(bare, "config", "core.fsmonitor", str(_hook_script(tmp_path, marker)))
+    assert _reasons(guard.scan()) == [("new_git_dir", bare)]
+    (repo / "assets").mkdir()
+    _host_git_status(repo / "assets")
+    assert not marker.exists()
+
+
+def test_existing_bare_repositories_are_part_of_the_baseline(repo):
+    subprocess.run(["git", "init", "-q", "--bare", str(repo / "fixtures.git")], check=True)
+    assert _start_box(_project(repo)).scan().clean
+
+
 def test_worktree_added_in_the_box_is_legitimate(repo, worktree):
     guard = _start_box(_project(repo))
     add_worktree(repo, worktree.parent / "agent", "agent")

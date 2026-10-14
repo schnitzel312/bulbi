@@ -21,7 +21,7 @@ from bulbi.gitsafety.findings import (
     HookChangedFinding,
     NewGitDirFinding,
 )
-from bulbi.gitsafety.inventory import AdminDir, EntryKind, GitSnapshot
+from bulbi.gitsafety.inventory import AdminDir, GitSnapshot
 from bulbi.gitsafety.layout import (
     COMMONDIR_FILE,
     GITDIR_FILE,
@@ -50,7 +50,7 @@ class ScanContext:
         known = [
             path
             for path, entry in self.baseline.snapshot.entries.items()
-            if entry.kind is EntryKind.DIRECTORY
+            if entry.kind.is_repository
         ]
         if self.baseline.common_dir is not None:
             known.insert(0, self.baseline.common_dir)
@@ -93,7 +93,9 @@ class GitCheck(ABC):
 class NewGitDirCheck(GitCheck):
     """§2.2.1: ``.git`` entries and worktree admin dirs created after box start.
 
-    A new ``.git`` *directory* is always a finding. A new ``.git`` file or link is one
+    A new ``.git`` *directory* is always a finding, and so is a new directory shaped
+    like a repository (``HEAD``, ``objects/``, ``refs/``), which git uses as one when
+    run inside it. A new ``.git`` file or link is one
     unless it is an ordinary linked checkout (pointing into a known repository's
     ``worktrees/`` or ``modules/``), and a new admin dir is one unless its pointers
     are consistent: ``git worktree add`` and ``git submodule`` keep working, while the
@@ -106,7 +108,7 @@ class NewGitDirCheck(GitCheck):
             previous = known.entries.get(path)
             if not context.box_writable(path) or (previous and previous.kind is entry.kind):
                 continue
-            if entry.kind is EntryKind.DIRECTORY:
+            if entry.kind.is_repository:
                 yield NewGitDirFinding(path)
             elif not context.legitimate_target(entry.target):
                 yield NewGitDirFinding(path, entry.target)
@@ -125,7 +127,7 @@ class ForeignPointerCheck(GitCheck):
         for path, entry in context.current.entries.items():
             previous = known.entries.get(path)
             if (
-                entry.kind is EntryKind.DIRECTORY
+                entry.kind.is_repository
                 or previous is None
                 or previous.kind is not entry.kind
                 or previous.target == entry.target

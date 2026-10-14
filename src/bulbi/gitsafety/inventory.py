@@ -37,6 +37,9 @@ from bulbi.paths import expand_home
 
 Clock = Callable[[], float]
 HOOKS_PATH_KEY = "core.hookspath"
+HEAD_FILE = "HEAD"
+OBJECTS_DIR = "objects"
+REFS_DIR = "refs"
 LINK_DIGEST_PREFIX = "link:"
 
 
@@ -46,6 +49,11 @@ class EntryKind(StrEnum):
     DIRECTORY = "dir"
     FILE = "file"  # ``gitdir: <path>``
     LINK = "link"  # a symlink named ``.git``
+    BARE = "bare"  # a directory shaped like a repository (git uses it when run inside)
+
+    @property
+    def is_repository(self) -> bool:
+        return self in (EntryKind.DIRECTORY, EntryKind.BARE)
 
 
 @dataclass(frozen=True)
@@ -91,8 +99,9 @@ class GitInventory:
     """Walks the mounted checkouts and records their git metadata.
 
     Directories named in ``skip`` (and ``.bulbi``) are not entered, nor are ``.git``
-    directories (their contents are reached through the pointers instead). The walk
-    stops when ``budget`` seconds have passed and marks the snapshot incomplete.
+    directories or bare-repository-shaped ones (their contents are reached through the
+    pointers instead). The walk stops when ``budget`` seconds have passed and marks the
+    snapshot incomplete.
     """
 
     def __init__(
@@ -140,6 +149,10 @@ class GitInventory:
     def _entries(self, root: Path) -> Iterator[tuple[Path, GitEntry]]:
         for directory, dirnames, filenames in os.walk(root):
             self._tick()
+            if _looks_like_git_dir(dirnames, filenames) and Path(directory) != root:
+                yield Path(directory), GitEntry(EntryKind.BARE)
+                dirnames.clear()
+                continue
             if GIT_DIR_NAME in dirnames or GIT_DIR_NAME in filenames:
                 path = Path(directory) / GIT_DIR_NAME
                 yield path, self._entry(path)
@@ -163,12 +176,13 @@ class GitInventory:
         git_dirs: dict[Path, Path] = {}
         repositories = [common_dir] if common_dir is not None else []
         for path, entry in entries.items():
-            if entry.kind is EntryKind.DIRECTORY:
+            if entry.kind.is_repository:
                 repositories.append(path)
             elif entry.target is not None and entry.target.is_dir():
                 git_dirs.setdefault(entry.target, path.parent)
         for repository in dict.fromkeys(repositories):
-            git_dirs.setdefault(repository, repository.parent)
+            checkout = repository.parent if repository.name == GIT_DIR_NAME else repository
+            git_dirs.setdefault(repository, checkout)
             for admin, state in self._admin_dirs(repository):
                 admin_dirs[admin] = state
                 checkout = state.gitdir.parent if state.gitdir is not None else admin
@@ -234,6 +248,11 @@ class GitInventory:
             self._tick()
             if hook.is_file() and os.access(hook, os.X_OK):
                 yield hook, _hook_digest(hook)
+
+
+def _looks_like_git_dir(dirnames: list[str], filenames: list[str]) -> bool:
+    """git's own test for a repository directory: ``HEAD``, ``objects/`` and ``refs/``."""
+    return HEAD_FILE in filenames and OBJECTS_DIR in dirnames and REFS_DIR in dirnames
 
 
 def _digest(path: Path) -> str:
