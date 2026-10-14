@@ -34,7 +34,9 @@ def main() -> None:
 @click.option("--force", is_flag=True, help="Overwrite an existing bulbi.toml.")
 def init(force: bool) -> None:
     """Generate a starter bulbi.toml for this project."""
-    from bulbi.init import generate_starter_spec
+    from bulbi.agents import AgentRegistry
+    from bulbi.constants import DEFAULT_AGENT
+    from bulbi.detection import DetectorRegistry, StarterSpecRenderer
 
     project_root = Path.cwd()
     spec_path = project_root / SPEC_FILENAME
@@ -44,7 +46,9 @@ def init(force: bool) -> None:
             f"{SPEC_FILENAME} already exists. Use --force to overwrite."
         )
 
-    content = generate_starter_spec(project_root)
+    project = DetectorRegistry.builtin().detect(project_root)
+    agent = AgentRegistry.builtin().resolve(DEFAULT_AGENT)
+    content = StarterSpecRenderer(agent).render(project)
     spec_path.write_text(content)
     console.print(f"[green]Wrote {SPEC_FILENAME}[/green]")
 

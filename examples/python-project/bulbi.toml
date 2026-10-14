@@ -10,7 +10,7 @@ agent = "claude"                 # what `bulbi run` launches by default
 allow = ["python@3.12", "poetry", "git", "rg"]
 
 [setup]
-# Runs once at image build, with network open to package registries only.
+# Runs once, the first time the container starts (network rules apply).
 run = ["poetry install"]
 
 [[mount]]
