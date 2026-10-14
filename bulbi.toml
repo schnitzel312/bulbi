@@ -1,0 +1,37 @@
+# bulbi.toml — sandbox spec for developing Bulbi itself
+spec = "0.1"
+
+[box]
+name = "bulbi"
+agent = "claude"
+
+[tools]
+allow = ["python@3.12", "git", "rg"]
+
+[setup]
+run = ["pip install -e . && pip install pytest"]
+
+[[mount]]
+path = "."
+mode = "read-write"
+exclude = [".env", "*.pem", "*.key"]
+
+[network]
+default = "deny"
+allow = [
+    # Python registries
+    "pypi.org",
+    "files.pythonhosted.org",
+    # Claude Code
+    "api.anthropic.com",
+    "platform.claude.com",
+    "claude.ai",
+    "console.anthropic.com",
+    "sentry.io",
+    "statsig.anthropic.com",
+    "statsig.com",
+]
+
+[limits]
+cpu = 2
+memory = "4GB"

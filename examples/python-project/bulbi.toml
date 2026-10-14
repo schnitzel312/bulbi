@@ -1,0 +1,43 @@
+# bulbi.toml — sandbox spec for a Python billing service
+spec = "0.1"
+
+[box]
+name = "billing-service"
+agent = "claude"                 # what `bulbi run` launches by default
+
+[tools]
+# The only programs on PATH. Everything else does not exist in the box.
+allow = ["python@3.12", "poetry", "git", "rg"]
+
+[setup]
+# Runs once at image build, with network open to package registries only.
+run = ["poetry install"]
+
+[[mount]]
+path = "."                        # the current worktree
+mode = "read-write"
+exclude = [".env", "*.pem"]
+
+[[mount]]
+path = "~/docs/billing-api"
+mode = "read-only"
+
+[network]
+default = "deny"
+allow = ["pypi.org", "files.pythonhosted.org", "api.stripe.com"]
+
+[secrets]
+# The agent sees a placeholder; the host proxy swaps in the real value
+# only on requests to the listed hosts.
+STRIPE_TEST_KEY = { from = "env", hosts = ["api.stripe.com"] }
+
+[limits]
+cpu = 2
+memory = "4GB"
+
+[profiles.reviewer]
+mounts = { "." = "read-only" }
+network.allow = []
+
+[profiles.test-runner]
+tools.allow = ["python@3.12", "poetry"]

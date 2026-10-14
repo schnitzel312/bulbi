@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bulbi"
+version = "0.1.0"
+description = "Run coding agents in isolated, spec-defined sandbox environments"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "click>=8.1",
+    "docker>=7.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+bulbi = "bulbi.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bulbi"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
