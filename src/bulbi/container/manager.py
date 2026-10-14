@@ -20,7 +20,7 @@ from bulbi.constants import (
 )
 from bulbi.container.handle import DockerContainerHandle
 from bulbi.container.identity import GATEWAY_SUFFIX, NETWORK_SUFFIX, BoxIdentity
-from bulbi.container.mounts import BindMount, PlannedMount, TmpfsMount
+from bulbi.container.mounts import BindMount, PlannedMount, TmpfsMount, VolumeMount
 from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.image.entrypoint import IDLE_WATCHER_PATH, PROJECT_DIR_ENV
 from bulbi.spec import BulbiSpec, LimitsSpec
@@ -136,7 +136,7 @@ class BoxManager:
                 detach=True,
                 name=name,
                 labels=labels,
-                mounts=[self._to_docker_mount(mount) for mount in launch.mounts],
+                mounts=[self.to_docker_mount(mount) for mount in launch.mounts],
                 environment={**launch.environment, PROJECT_DIR_ENV: str(launch.project_root)},
                 stdin_open=True,
                 tty=True,
@@ -220,10 +220,14 @@ class BoxManager:
         }
 
     @staticmethod
-    def _to_docker_mount(mount: PlannedMount) -> Any:
+    def to_docker_mount(mount: PlannedMount) -> Any:
         mount_type = docker_sdk().types.Mount
         if isinstance(mount, TmpfsMount):
             return mount_type(target=mount.target, source=None, type="tmpfs", read_only=True)
+        if isinstance(mount, VolumeMount):
+            return mount_type(
+                target=mount.target, source=mount.volume, type="volume", read_only=mount.read_only
+            )
         assert isinstance(mount, BindMount)
         return mount_type(
             target=mount.target, source=mount.source, type="bind", read_only=mount.read_only

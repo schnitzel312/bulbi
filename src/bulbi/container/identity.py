@@ -22,6 +22,7 @@ _HASH_LENGTH = 8
 _UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_.-]")
 GATEWAY_SUFFIX = "-gw"
 NETWORK_SUFFIX = "-net"
+GIT_VOLUME_PREFIX = "bulbi-git-"
 
 
 @dataclass(frozen=True)
@@ -33,9 +34,12 @@ class BoxIdentity:
     profile: str | None = None
 
     @property
+    def _project_hash(self) -> str:
+        return hashlib.sha256(str(self.project).encode()).hexdigest()[:_HASH_LENGTH]
+
+    @property
     def name(self) -> str:
-        project_hash = hashlib.sha256(str(self.project).encode()).hexdigest()[:_HASH_LENGTH]
-        name = f"bulbi-{self.box_name}-{project_hash}"
+        name = f"bulbi-{self.box_name}-{self._project_hash}"
         if self.profile:
             name += f"-{_UNSAFE_NAME_CHARS.sub('_', self.profile)}"
         return name
@@ -47,6 +51,11 @@ class BoxIdentity:
     @property
     def network_name(self) -> str:
         return self.name + NETWORK_SUFFIX
+
+    @property
+    def git_volume_name(self) -> str:
+        """The isolated-mode clone: one per project, shared by its profiles' boxes."""
+        return f"{GIT_VOLUME_PREFIX}{self.box_name}-{self._project_hash}"
 
     def labels(self, spec_hash: str | None = None, *, gateway: bool = False) -> dict[str, str]:
         labels = {

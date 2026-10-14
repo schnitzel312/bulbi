@@ -5,9 +5,13 @@
 * Linked worktrees whose parent directory holds nothing but worktrees of this repo are
   covered by mounting that parent once (new worktrees then appear without a restart);
   otherwise each worktree is mounted on its own. A mixed parent is never mounted.
-* Read-only overlays in every checkout: ``bulbi.toml``, the shared ``.git/hooks`` and
-  ``.git/config``, and each worktree's ``config.worktree`` — so the agent cannot loosen
-  its sandbox or plant code that runs on the host.
+* Read-only overlays in every checkout: ``bulbi.toml`` and each linked worktree's
+  ``.git`` file, plus the main checkout's ``.bulbi/`` (lock, audit log, git baseline and
+  quarantine) — so the agent cannot loosen its sandbox or its own oversight.
+* The project's git metadata is exposed by a :class:`GitMetadataMounts` strategy chosen
+  by ``[git] mode`` (docs/specs/git-safety.md): read-only overlays on the shared hooks,
+  config and worktree pointer files (guarded), or a volume holding the box's own clone
+  in place of the host's git directory (isolated).
 * Excluded files are masked with ``/dev/null``; excluded directories with an empty
   read-only tmpfs.
 """
@@ -15,11 +19,12 @@
 from __future__ import annotations
 
 import glob
-from collections.abc import Iterable, Iterator
+from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from bulbi.constants import CONTAINER_WORKSPACE, SPEC_FILENAME
+from bulbi.constants import CONTAINER_WORKSPACE, LOG_DIR, SPEC_FILENAME
 from bulbi.errors import SpecError
 from bulbi.paths import expand_home
 from bulbi.project.locator import Project
@@ -52,7 +57,95 @@ class TmpfsMount:
     target: str
 
 
-PlannedMount = BindMount | TmpfsMount
+@dataclass(frozen=True)
+class VolumeMount:
+    """A named Docker volume mounted at ``target``."""
+
+    volume: str
+    target: str
+    read_only: bool = False
+
+
+PlannedMount = BindMount | TmpfsMount | VolumeMount
+
+
+@dataclass(frozen=True)
+class HostExposure:
+    """Which host paths a box can write.
+
+    Attributes:
+        writable: Host directories bound read-write.
+        protected: Host paths inside ``writable`` that the box cannot write after all,
+            because a read-only bind, a tmpfs or a volume covers them.
+    """
+
+    writable: tuple[Path, ...]
+    protected: tuple[Path, ...]
+
+
+def host_exposure(mounts: Sequence[PlannedMount]) -> HostExposure:
+    """What ``mounts`` let the box write on the host."""
+    writable = {
+        mount.target: Path(mount.source)
+        for mount in mounts
+        if isinstance(mount, BindMount) and not mount.read_only
+    }
+    protected = []
+    for mount in mounts:
+        if isinstance(mount, BindMount) and not mount.read_only:
+            continue
+        host_path = _host_path_of(Path(mount.target), writable)
+        if host_path is not None:
+            protected.append(host_path)
+    return HostExposure(tuple(dict.fromkeys(writable.values())), tuple(dict.fromkeys(protected)))
+
+
+def _host_path_of(target: Path, writable: dict[str, Path]) -> Path | None:
+    """The host path a box path inside a read-write bind corresponds to."""
+    for ancestor in (target, *target.parents):
+        source = writable.get(str(ancestor))
+        if source is not None:
+            return source / target.relative_to(ancestor)
+    return None
+
+
+class GitMetadataMounts(ABC):
+    """How the box sees the project's git metadata (one strategy per ``[git] mode``)."""
+
+    @abstractmethod
+    def mounts(self, project: Project) -> Iterator[PlannedMount]:
+        """The mounts covering the shared git directory; only called for git projects."""
+
+
+class ProtectedGitMetadata(GitMetadataMounts):
+    """Guarded mode: the host's git directory, with the files git obeys read-only.
+
+    A missing hooks directory is hidden too, so it cannot be created and filled.
+    """
+
+    def mounts(self, project: Project) -> Iterator[PlannedMount]:
+        git_dir = project.git_dir
+        if git_dir is None:
+            return
+        hooks = git_dir / _HOOKS_DIR
+        yield BindMount(str(hooks), str(hooks), True) if hooks.is_dir() else TmpfsMount(str(hooks))
+        admin_dirs = [git_dir, *filter(None, map(project.admin_dir, project.linked_worktrees))]
+        for admin in admin_dirs:
+            for name in _PROTECTED_GIT_FILES:
+                path = admin / name
+                if path.is_file():
+                    yield BindMount(str(path), str(path), read_only=True)
+
+
+class IsolatedGitMetadata(GitMetadataMounts):
+    """Isolated mode: a volume with the box's own clone replaces the host's git directory."""
+
+    def __init__(self, volume: str) -> None:
+        self._volume = volume
+
+    def mounts(self, project: Project) -> Iterator[PlannedMount]:
+        if project.git_dir is not None:
+            yield VolumeMount(self._volume, str(project.git_dir))
 
 
 def is_worktree_container(directory: Path, worktrees: Iterable[Path]) -> bool:
@@ -68,8 +161,14 @@ def is_worktree_container(directory: Path, worktrees: Iterable[Path]) -> bool:
 class MountPlanner:
     """Turns a spec's mounts into Docker mounts for one project."""
 
-    def __init__(self, project: Project, home: Path | None = None) -> None:
+    def __init__(
+        self,
+        project: Project,
+        git_metadata: GitMetadataMounts | None = None,
+        home: Path | None = None,
+    ) -> None:
         self._project = project
+        self._git_metadata = git_metadata or ProtectedGitMetadata()
         self._home = home or Path.home()
 
     def checkout_roots(self, spec: BulbiSpec) -> list[Path]:
@@ -133,19 +232,13 @@ class MountPlanner:
                 # A linked worktree's `.git` is a file pointing at its admin dir.
                 if path.is_file():
                     yield BindMount(str(path), str(path), read_only=True)
-        git_dir = self._project.git_dir
-        if git_dir is None:
-            return
-        hooks = git_dir / _HOOKS_DIR
-        # A missing hooks directory is hidden too, so it cannot be created and filled.
-        yield BindMount(str(hooks), str(hooks), True) if hooks.is_dir() else TmpfsMount(str(hooks))
-        linked = self._project.linked_worktrees
-        admin_dirs = [git_dir, *filter(None, map(self._project.admin_dir, linked))]
-        for admin in admin_dirs:
-            for name in _PROTECTED_GIT_FILES:
-                path = admin / name
-                if path.is_file():
-                    yield BindMount(str(path), str(path), read_only=True)
+        state_dir = self._project.root / LOG_DIR
+        yield (
+            BindMount(str(state_dir), str(state_dir), True)
+            if state_dir.is_dir()
+            else TmpfsMount(str(state_dir))
+        )
+        yield from self._git_metadata.mounts(self._project)
 
     # ---- other mounts ------------------------------------------------------------------
 

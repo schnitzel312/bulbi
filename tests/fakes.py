@@ -54,12 +54,17 @@ class FakeContainer:
         self.removed = False
         self.attrs: dict = {"NetworkSettings": {"Networks": {}}}
         self.log_output = b""
+        self.exit_code = 0
 
     def reload(self) -> None:
         pass
 
-    def logs(self, tail: int) -> bytes:
+    def logs(self, tail: int | None = None) -> bytes:
         return self.log_output
+
+    def wait(self, timeout: int | None = None) -> dict:
+        self.status = "exited"
+        return {"StatusCode": self.exit_code}
 
     def exec_run(self, argv: list[str], user: str | None = None) -> FakeExecRun:
         self.exec_calls.append((argv, user))
@@ -92,7 +97,8 @@ class FakeContainers:
 
     def run(self, image: str, **kwargs) -> FakeContainer:
         self.run_calls.append((image, kwargs))
-        container = FakeContainer(kwargs["name"], kwargs.get("labels"))
+        name = kwargs.get("name", f"helper-{len(self.run_calls)}")
+        container = FakeContainer(name, kwargs.get("labels"))
         container.attrs["Mounts"] = [
             {"Destination": m["Target"]} for m in kwargs.get("mounts", [])
         ]
@@ -181,6 +187,26 @@ class FakeNetworks:
         return [n for n in live if names is None or n.name in names]
 
 
+class FakeVolume:
+    def __init__(self, name: str, labels: dict[str, str]) -> None:
+        self.name = name
+        self.labels = labels
+
+
+class FakeVolumes:
+    def __init__(self) -> None:
+        self.by_name: dict[str, FakeVolume] = {}
+
+    def get(self, name: str) -> FakeVolume:
+        if name not in self.by_name:
+            raise docker.errors.NotFound(f"No such volume: {name}")
+        return self.by_name[name]
+
+    def create(self, name: str, labels: dict[str, str]) -> FakeVolume:
+        self.by_name[name] = FakeVolume(name, labels)
+        return self.by_name[name]
+
+
 class FakeApi:
     """The low-level client: exec inspection for session counting."""
 
@@ -198,7 +224,17 @@ class FakeDocker:
         self.images = FakeImages(images)
         self.containers = FakeContainers()
         self.networks = FakeNetworks()
+        self.volumes = FakeVolumes()
         self.api = FakeApi()
+
+    @property
+    def helper_runs(self) -> list[dict]:
+        """Git helper containers (isolated mode) that were run."""
+        return [
+            kwargs
+            for _, kwargs in self.containers.run_calls
+            if (kwargs.get("labels") or {}).get("bulbi.role") == "git-helper"
+        ]
 
     @property
     def box_builds(self) -> list[dict]:

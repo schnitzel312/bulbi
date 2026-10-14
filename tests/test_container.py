@@ -42,7 +42,7 @@ def _binds(plan) -> list[tuple[str, str, bool]]:
 def test_plain_project_is_mounted_at_its_host_path(tmp_path: Path):
     plan = MountPlanner(Project.plain(tmp_path)).plan(_spec())
     root = str(tmp_path.resolve())
-    assert plan == [BindMount(root, root, read_only=False)]
+    assert plan == [BindMount(root, root, read_only=False), TmpfsMount(f"{root}/.bulbi")]
 
 
 def test_other_mounts_keep_their_workspace_target(tmp_path: Path):
@@ -393,3 +393,82 @@ def test_expand_home_is_the_single_tilde_rule_review_minor_5(raw, expanded):
     from bulbi.paths import expand_home
 
     assert expand_home(raw, "/h") == expanded
+
+
+# ---- git safety: mounts (docs/specs/git-safety.md) ----------------------------------------
+
+
+def test_bulbi_state_dir_is_read_only_in_the_box(repo):
+    """The baseline and quarantine live in .bulbi/; a writable one would let the agent
+    whitelist what it planted (and rewrite the relay's pid file)."""
+    state = repo / ".bulbi"
+    state.mkdir()
+    binds = _binds(MountPlanner(_project(repo)).plan(_spec()))
+    assert (str(state), str(state), True) in binds
+
+
+def test_isolated_git_replaces_the_git_dir_with_the_clone_volume(tmp_path, repo):
+    from bulbi.container.mounts import IsolatedGitMetadata, VolumeMount
+
+    wt = add_worktree(repo, tmp_path / "trees" / "wt", "wt")
+    plan = MountPlanner(_project(repo), IsolatedGitMetadata("vol")).plan(_spec())
+    git_dir = repo / ".git"
+    assert VolumeMount("vol", str(git_dir)) in plan
+    assert not [m for m in plan if m.target != str(git_dir) and m.target.startswith(str(git_dir))]
+    assert (str(wt / ".git"), str(wt / ".git"), True) in _binds(plan)
+
+
+def test_host_exposure_maps_box_paths_back_to_the_host(tmp_path):
+    from bulbi.container.mounts import VolumeMount, host_exposure
+
+    exposure = host_exposure(
+        [
+            BindMount("/p", "/p", False),
+            BindMount("/p/bulbi.toml", "/p/bulbi.toml", True),
+            TmpfsMount("/p/.git/hooks"),
+            VolumeMount("v", "/p/.git"),
+            BindMount("/data", f"{WORKSPACE}/data", False),
+            BindMount("/dev/null", f"{WORKSPACE}/data/.env", True),
+            BindMount("/docs", f"{WORKSPACE}/docs", True),
+        ]
+    )
+    assert exposure.writable == (Path("/p"), Path("/data"))
+    assert exposure.protected == (
+        Path("/p/bulbi.toml"),
+        Path("/p/.git/hooks"),
+        Path("/p/.git"),
+        Path("/data/.env"),
+    )
+
+
+def test_volume_mounts_reach_docker():
+    from bulbi.container.mounts import VolumeMount
+
+    mount = BoxManager.to_docker_mount(VolumeMount("bulbi-git-x", "/p/.git"))
+    assert (mount["Type"], mount["Source"], mount["Target"]) == (
+        "volume",
+        "bulbi-git-x",
+        "/p/.git",
+    )
+
+
+def test_clone_volume_is_per_project_not_per_profile(tmp_path):
+    plain, profiled = BoxIdentity(tmp_path, "demo"), BoxIdentity(tmp_path, "demo", "ro")
+    assert plain.git_volume_name == profiled.git_volume_name
+    assert plain.git_volume_name.startswith("bulbi-git-demo-")
+    assert BoxIdentity(tmp_path / "other", "demo").git_volume_name != plain.git_volume_name
+
+
+def test_git_helper_runs_offline_with_only_ownership_capabilities():
+    from bulbi.container.gitvolume import GitVolumeManager
+    from bulbi.container.mounts import VolumeMount
+
+    client = FakeDocker()
+    result = GitVolumeManager(client).run_helper("img", "echo hi", ["a"], [VolumeMount("v", "/c")])
+    (kwargs,) = client.helper_runs
+    assert result.exit_code == 0
+    assert kwargs["network_mode"] == "none"
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert kwargs["cap_add"] == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    assert kwargs["command"] == ["bash", "-c", "echo hi", "bulbi-git-helper", "a"]
+    assert all(c.removed for c in client.containers.by_key.values())
