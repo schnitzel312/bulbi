@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TypeVar
 
-from bulbi.constants import DEFAULT_AGENT, DEFAULT_CPU, DEFAULT_IDLE_TIMEOUT, DEFAULT_MEMORY
+from bulbi.constants import (
+    DEFAULT_AGENT,
+    DEFAULT_CPU,
+    DEFAULT_GIT_SCAN_BUDGET,
+    DEFAULT_GIT_SCAN_SKIP,
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MEMORY,
+)
 from bulbi.errors import SpecError
 
 _CONTENT_HASH_LENGTH = 16
@@ -33,6 +40,20 @@ class NetworkDefault(StrEnum):
 
     DENY = "deny"
     ALLOW = "allow"
+
+
+class GitModeKind(StrEnum):
+    """How the box reaches the project's git metadata (``[git] mode``)."""
+
+    GUARDED = "guarded"  # Host metadata mounted; Bulbi scans and neutralises changes.
+    ISOLATED = "isolated"  # The box works on its own clone in a volume.
+
+
+class FindingPolicy(StrEnum):
+    """What Bulbi does about dangerous git metadata (``[git] on_finding``)."""
+
+    QUARANTINE = "quarantine"  # Move it aside (restorable) and carry on.
+    BLOCK = "block"  # Change nothing and refuse to attach.
 
 
 class SecretSource(StrEnum):
@@ -61,13 +82,7 @@ class BoxSpec:
 
     def idle_timeout_seconds(self) -> int:
         """``idle_timeout`` (``"0"``, ``"90s"``, ``"10m"``, ``"2h"``) in seconds."""
-        match = _DURATION_PATTERN.match(str(self.idle_timeout).strip().lower())
-        if not match:
-            raise SpecError(
-                f"box.idle_timeout must look like '0', '30s', '10m' or '1h', "
-                f"got '{self.idle_timeout}'"
-            )
-        return int(match.group(1)) * _DURATION_UNITS[match.group(2) or "s"]
+        return _duration_seconds(self.idle_timeout, "box.idle_timeout")
 
 
 @dataclass(frozen=True)
@@ -75,6 +90,30 @@ class ProjectSpec:
     """How the project's checkouts are found (git worktrees, §9)."""
 
     worktree_dirs: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GitSpec:
+    """Git safety (``[git]``, see docs/specs/git-safety.md).
+
+    ``scan_budget`` bounds how long one scan may walk the mounted checkouts; ``skip``
+    names directories the walk never enters (large, ignored trees such as
+    ``node_modules``).
+    """
+
+    mode: GitModeKind = GitModeKind.GUARDED
+    on_finding: FindingPolicy = FindingPolicy.QUARANTINE
+    scan_budget: str = DEFAULT_GIT_SCAN_BUDGET
+    skip: list[str] = field(default_factory=lambda: list(DEFAULT_GIT_SCAN_SKIP))
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mode", _parse_enum(GitModeKind, self.mode, "git.mode"))
+        object.__setattr__(
+            self, "on_finding", _parse_enum(FindingPolicy, self.on_finding, "git.on_finding")
+        )
+
+    def scan_budget_seconds(self) -> int:
+        return _duration_seconds(self.scan_budget, "git.scan_budget")
 
 
 @dataclass(frozen=True)
@@ -182,6 +221,7 @@ class BulbiSpec:
     limits: LimitsSpec = field(default_factory=LimitsSpec)
     profiles: dict[str, ProfileSpec] = field(default_factory=dict)
     project: ProjectSpec = field(default_factory=ProjectSpec)
+    git: GitSpec = field(default_factory=GitSpec)
 
     def content_hash(self) -> str:
         """Short hash of everything that affects the built image."""
@@ -194,6 +234,14 @@ class BulbiSpec:
         }
         encoded = json.dumps(image_inputs, sort_keys=True).encode()
         return hashlib.sha256(encoded).hexdigest()[:_CONTENT_HASH_LENGTH]
+
+
+def _duration_seconds(value: str, label: str) -> int:
+    """A duration (``"0"``, ``"90s"``, ``"10m"``, ``"2h"``) in seconds."""
+    match = _DURATION_PATTERN.match(str(value).strip().lower())
+    if not match:
+        raise SpecError(f"{label} must look like '0', '30s', '10m' or '1h', got '{value}'")
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2) or "s"]
 
 
 def _known(enum_type: type[_EnumT], value: object) -> object:

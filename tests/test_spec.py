@@ -333,3 +333,45 @@ def test_profile_network_keeps_root_denies(sample_toml: Path):
     root = replace(spec, network=replace(spec.network, deny=["evil.test"]))
     merged = ProfileMerger().merge(root, ProfileSpec(network=NetworkSpec(allow=[], deny=["x.y"])))
     assert merged.network.deny == ["evil.test", "x.y"]
+
+
+# ---- [git] (docs/specs/git-safety.md) ----------------------------------------------------
+
+
+def test_git_section_defaults_to_guarded_quarantine(tmp_path: Path):
+    from bulbi.constants import DEFAULT_GIT_SCAN_SKIP
+    from bulbi.spec import FindingPolicy, GitModeKind
+
+    (tmp_path / "bulbi.toml").write_text(_minimal_spec_toml("x"))
+    git = SpecLoader().load(tmp_path).git
+    assert git.mode is GitModeKind.GUARDED and git.on_finding is FindingPolicy.QUARANTINE
+    assert git.scan_budget_seconds() == 10
+    assert git.skip == list(DEFAULT_GIT_SCAN_SKIP)
+
+
+def test_git_section_is_parsed(tmp_path: Path):
+    from bulbi.spec import FindingPolicy, GitModeKind
+
+    (tmp_path / "bulbi.toml").write_text(
+        _minimal_spec_toml("x")
+        + '[git]\nmode = "isolated"\non_finding = "block"\nscan_budget = "1m"\nskip = ["vendor"]\n'
+    )
+    git = SpecLoader().load(tmp_path).git
+    assert git.mode is GitModeKind.ISOLATED and git.on_finding is FindingPolicy.BLOCK
+    assert git.scan_budget_seconds() == 60 and git.skip == ["vendor"]
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [('mode = "open"', "git.mode must be 'guarded' or 'isolated'"),
+     ('on_finding = "ignore"', "git.on_finding must be 'quarantine' or 'block'")],
+)  # fmt: skip
+def test_git_section_rejects_unknown_values(tmp_path: Path, line, message):
+    (tmp_path / "bulbi.toml").write_text(_minimal_spec_toml("x") + f"[git]\n{line}\n")
+    with pytest.raises(SpecError, match=message):
+        SpecLoader().load(tmp_path)
+
+
+def test_profiles_keep_the_root_git_settings(sample_toml: Path):
+    spec = SpecLoader().load(sample_toml)
+    assert ProfileMerger().resolve(spec, "reviewer").git == spec.git

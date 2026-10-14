@@ -7,6 +7,8 @@ from typing import Any
 from bulbi.constants import (
     DEFAULT_AGENT,
     DEFAULT_CPU,
+    DEFAULT_GIT_SCAN_BUDGET,
+    DEFAULT_GIT_SCAN_SKIP,
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_MEMORY,
     SPEC_VERSION,
@@ -15,6 +17,9 @@ from bulbi.errors import SpecError
 from bulbi.spec.models import (
     BoxSpec,
     BulbiSpec,
+    FindingPolicy,
+    GitModeKind,
+    GitSpec,
     LimitsSpec,
     MountMode,
     MountSpec,
@@ -52,6 +57,7 @@ class SpecParser:
             project=ProjectSpec(
                 worktree_dirs=list(raw.get("project", {}).get("worktree_dirs", []))
             ),
+            git=self._parse_git(raw.get("git", {})),
         )
 
     @staticmethod
@@ -108,6 +114,15 @@ class SpecParser:
             to=raw.get("to", SecretTarget.ENV),
             path=raw.get("path"),
             hosts=list(raw.get("hosts", [])),
+        )
+
+    @staticmethod
+    def _parse_git(raw: RawTable) -> GitSpec:
+        return GitSpec(
+            mode=raw.get("mode", GitModeKind.GUARDED),
+            on_finding=raw.get("on_finding", FindingPolicy.QUARANTINE),
+            scan_budget=str(raw.get("scan_budget", DEFAULT_GIT_SCAN_BUDGET)),
+            skip=list(raw.get("skip", DEFAULT_GIT_SCAN_SKIP)),
         )
 
     @staticmethod

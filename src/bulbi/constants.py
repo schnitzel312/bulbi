@@ -27,6 +27,23 @@ DEFAULT_AGENT = "claude"
 # How long an idle box keeps running before its watcher stops it.
 DEFAULT_IDLE_TIMEOUT = "10m"
 
+# Git safety: how long one scan of the mounted checkouts may take, and the (large,
+# ignored) directories it never walks into.
+DEFAULT_GIT_SCAN_BUDGET = "10s"
+DEFAULT_GIT_SCAN_SKIP = (
+    "node_modules",
+    ".venv",
+    "venv",
+    "target",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".gradle",
+    ".next",
+)
+
 # Default resource limits.
 DEFAULT_CPU = 2
 DEFAULT_MEMORY = "4GB"

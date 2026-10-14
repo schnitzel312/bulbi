@@ -29,3 +29,7 @@ class AuditLogError(BulbiError):
 
 class SandboxError(BulbiError):
     """Building, starting, or managing a sandbox container failed."""
+
+
+class GitSafetyError(BulbiError):
+    """Dangerous git metadata stops an attach, or neutralising or restoring it failed."""
