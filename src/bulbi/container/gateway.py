@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bulbi.container.identity import GATEWAY_SUFFIX, BoxIdentity
+from bulbi.container.identity import GATEWAY_SUFFIX, NETWORK_SUFFIX, BoxIdentity
 from bulbi.container.manager import RUNNING, ContainerState
 from bulbi.docker_sdk import docker_errors, docker_sdk
 from bulbi.errors import SandboxError
@@ -208,16 +208,33 @@ class GatewayManager:
                 return
 
     def reap(self, containers: Iterable[ContainerState]) -> list[str]:
-        """Stop running gateways whose box is not running (spec §8.3); returns their names."""
+        """Tidy gateways whose box is not running (spec §8.3); returns their names.
+
+        A gateway whose box is stopped is stopped too (kept for a fast restart); one whose
+        box no longer exists is removed together with its network.
+        """
         states = list(containers)
-        running_boxes = {s.name for s in states if not s.is_gateway and s.running}
+        boxes = {s.name: s for s in states if not s.is_gateway}
         reaped = []
-        for state in states:
+        for state in (s for s in states if s.is_gateway):
             box_name = state.name.removesuffix(GATEWAY_SUFFIX)
-            if state.is_gateway and state.running and box_name not in running_boxes:
+            box = boxes.get(box_name)
+            if box is None:
+                self.remove(state.id)
+                self._remove_network_named(box_name + NETWORK_SUFFIX)
+                reaped.append(state.name)
+            elif state.running and not box.running:
                 self.stop(state.id)
                 reaped.append(state.name)
         return reaped
+
+    def _remove_network_named(self, name: str) -> None:
+        with docker_errors(f"failed to inspect network {name}"):
+            try:
+                network_id = self._docker.networks.get(name).id
+            except docker_sdk().errors.NotFound:
+                return
+        self.remove_network(network_id)
 
     @staticmethod
     def _logs(container: Any) -> str:

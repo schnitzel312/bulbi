@@ -360,3 +360,25 @@ def test_worktree_git_pointers_are_read_only_review_b1(tmp_path, repo):
     binds = _binds(MountPlanner(_project(repo)).plan(_spec()))
     for path in (wt / ".git", admin / "commondir", admin / "gitdir"):
         assert (str(path), str(path), True) in binds, path
+
+
+def test_reap_removes_gateways_of_removed_boxes_and_stops_those_of_stopped_boxes():
+    """Review MINOR-1: a gateway whose box was removed used to linger until reset."""
+    from bulbi.container.gateway import GatewayManager
+
+    client = FakeDocker()
+    stopped_box = client.containers.add(FakeContainer("bulbi-a-1"))
+    stopped_box.status = "exited"
+    kept_gateway = client.containers.add(
+        FakeContainer("bulbi-a-1-gw", labels={"bulbi.role": "gateway"})
+    )
+    orphan_gateway = client.containers.add(
+        FakeContainer("bulbi-b-2-gw", labels={"bulbi.role": "gateway"})
+    )
+    orphan_network = client.networks.create("bulbi-b-2-net", "bridge", {}, True)
+    manager = GatewayManager(client, clock=lambda: 0.0, sleep=lambda _: None)
+
+    manager.reap(BoxManager(client).list_containers())
+
+    assert kept_gateway.status == "exited" and not kept_gateway.removed
+    assert orphan_gateway.removed and orphan_network.removed
