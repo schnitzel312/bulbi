@@ -28,7 +28,13 @@ class SecretUnavailableError(Exception):
 
 
 class SecretReader(ABC):
-    """Reads one kind of secret source on the host."""
+    """Reads one kind of secret source on the host.
+
+    ``safe_to_probe`` says whether ``bulbi check`` may read it just to show availability:
+    false for readers that run programs or may prompt the user (keychain, command).
+    """
+
+    safe_to_probe: bool = True
 
     @abstractmethod
     def read(self, source: str) -> str:
@@ -62,6 +68,8 @@ class FileReader(SecretReader):
 class KeychainReader(SecretReader):
     """macOS Keychain generic passwords (``security find-generic-password -s <service> -w``)."""
 
+    safe_to_probe = False  # May prompt for keychain access.
+
     def __init__(self, runner: CommandRunner = subprocess.run, system: str | None = None) -> None:
         self._run = runner
         self._system = system
@@ -86,6 +94,8 @@ class KeychainReader(SecretReader):
 
 class CommandReader(SecretReader):
     """Runs the command on the host (argv split, no shell, 10 s timeout); stdout trimmed."""
+
+    safe_to_probe = False  # Runs a program named in the (possibly untrusted) spec.
 
     def __init__(
         self, runner: CommandRunner = subprocess.run, timeout: float = COMMAND_TIMEOUT_SECONDS
@@ -133,6 +143,10 @@ class SecretReaders:
                 SecretSource.COMMAND: CommandReader(),
             }
         )
+
+    def safe_to_probe(self, kind: SecretSource) -> bool:
+        reader = self._readers.get(kind)
+        return reader is not None and reader.safe_to_probe
 
     def read(self, kind: SecretSource, source: str) -> str:
         reader = self._readers.get(kind)

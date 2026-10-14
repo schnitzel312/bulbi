@@ -21,6 +21,10 @@ from bulbi.spec import BulbiSpec
 from bulbi.validation import ValidationResult
 
 NOT_SET = "-"
+UNPROBED_NOTE = (
+    "Command and keychain secrets are not read by check (they may run programs or prompt); "
+    "use --probe-secrets to resolve them now."
+)
 SECRETS_THREAT_MODEL = (
     "The agent can read every secret it is given; the network policy limits where it can "
     "send them. Values are never shown or logged."
@@ -53,6 +57,8 @@ class SpecReportRenderer:
         if secrets:
             self._console.print(self._secrets_table(secrets))
             self._console.print(f"[dim]{SECRETS_THREAT_MODEL}[/dim]")
+            if any(status.available is None for status in secrets):
+                self._console.print(f"[dim]{UNPROBED_NOTE}[/dim]")
         ValidationRenderer(self._console).render(result)
         self._console.print()
 
@@ -115,11 +121,13 @@ class SpecReportRenderer:
         for status in secrets:
             declaration = status.declaration
             name = declaration.name + (" (built-in)" if declaration.builtin else "")
-            available = (
-                styled("✓", ALLOWED_STYLE)
-                if status.available
-                else styled("✗" if not declaration.optional else "✗ (optional)", CAUTION_STYLE)
-            )
+            if status.available is None:
+                available = "[dim]resolved at run[/dim]"
+            elif status.available:
+                available = styled("✓", ALLOWED_STYLE)
+            else:
+                missing = "✗ (optional)" if declaration.optional else "✗"
+                available = styled(missing, CAUTION_STYLE)
             table.add_row(
                 name, declaration.describe_source(), declaration.describe_target(), available
             )

@@ -67,7 +67,7 @@ class Harness:
         return self.docker
 
     def invoke(self, *args: str, input: str | None = None) -> Result:
-        app = AppContext(
+        self.app = app = AppContext(
             project_root=self.project_root,
             console=Console(width=200),
             docker_factory=self._docker_factory,
@@ -599,3 +599,37 @@ def test_run_with_missing_secret_fails_cleanly_and_starts_nothing(cli: Harness):
     assert "secret NPM_RC (file: ~/.npmrc) is unavailable" in result.output
     assert "ghp-super-secret" not in result.output
     assert cli.docker.containers.run_calls == []
+
+
+SIDE_EFFECT_SPEC = SPEC + (
+    "\n[secrets]\n"
+    'NPM_TOKEN = { from = "command", source = "op read op://dev/npm" }\n'
+    'SENTRY = { from = "keychain", source = "sentry-dsn" }\n'
+    'GITHUB_TOKEN = { from = "env" }\n'
+)
+
+
+def _reads(cli: Harness, kind: str) -> list[str]:
+    from bulbi.spec import SecretSource
+
+    return cli.app.secret_readers._readers[SecretSource(kind)].reads  # type: ignore[attr-defined]
+
+
+def test_check_never_runs_command_or_keychain_secret_sources(cli: Harness):
+    """Review M1: check must not execute host programs from a (possibly untrusted) spec."""
+    cli.write_spec(SIDE_EFFECT_SPEC)
+    cli.secrets.update({"op read op://dev/npm": "x", "sentry-dsn": "y", "GITHUB_TOKEN": "z"})
+    result = cli.invoke("check")
+    assert _reads(cli, "command") == [] and _reads(cli, "keychain") == []
+    assert set(_reads(cli, "env")) == {"GITHUB_TOKEN", "ANTHROPIC_API_KEY"}  # env is safe
+    assert result.output.count("resolved at run") >= 3  # NPM_TOKEN, SENTRY, CLAUDE_OAUTH
+    assert "--probe-secrets" in result.output
+
+
+def test_check_probe_secrets_resolves_everything(cli: Harness):
+    cli.write_spec(SIDE_EFFECT_SPEC)
+    cli.secrets.update({"op read op://dev/npm": "x", "sentry-dsn": "y", "GITHUB_TOKEN": "z"})
+    result = cli.invoke("check", "--probe-secrets")
+    assert _reads(cli, "command") == ["op read op://dev/npm"]
+    assert "sentry-dsn" in _reads(cli, "keychain")
+    assert "resolved at run" not in result.output

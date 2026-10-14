@@ -223,9 +223,10 @@ class RecordingRunner:
 class FakeSecretReader(SecretReader):
     """A host source backed by a dict; missing keys are unavailable."""
 
-    def __init__(self, values: dict[str, str] | None = None) -> None:
+    def __init__(self, values: dict[str, str] | None = None, safe_to_probe: bool = True) -> None:
         self.values = values if values is not None else {}
         self.reads: list[str] = []
+        self.safe_to_probe = safe_to_probe
 
     def read(self, source: str) -> str:
         self.reads.append(source)
@@ -235,6 +236,12 @@ class FakeSecretReader(SecretReader):
 
 
 def fake_secret_readers(values: dict[str, str] | None = None) -> SecretReaders:
-    """Every source kind reads from the same dict (no real env, keychain or commands)."""
-    reader = FakeSecretReader(values)
-    return SecretReaders({kind: reader for kind in SecretSource})
+    """Every source kind reads from the same dict (no real env, keychain or commands).
+
+    Like the real readers, keychain and command fakes are not safe to probe in ``check``.
+    """
+    values = values if values is not None else {}
+    unsafe = {SecretSource.KEYCHAIN, SecretSource.COMMAND}
+    return SecretReaders(
+        {kind: FakeSecretReader(values, safe_to_probe=kind not in unsafe) for kind in SecretSource}
+    )
