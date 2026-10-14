@@ -103,6 +103,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._relay(self.connection, upstream)
 
+    # TODO(bulbi): CONNECT is checked by domain only; any port on an allowed domain is
+    # permitted (e.g. allowed.com:22), not just 443.
     def _connect_target(self) -> tuple[str, int] | None:
         host, _, port = self.path.rpartition(":")
         if not host:

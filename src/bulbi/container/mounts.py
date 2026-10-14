@@ -60,7 +60,12 @@ class MountPlanner:
 
     @staticmethod
     def _excluded_files(source: Path, patterns: list[str]) -> list[Path]:
-        """Existing files under ``source`` matching the exclude globs, relative to it."""
+        """Existing files under ``source`` matching the exclude globs, relative to it.
+
+        TODO(bulbi): masking is best-effort. Only files that exist at container start are
+        masked, globs are not recursive, and a pattern matching a directory binds
+        /dev/null onto a directory, which makes ``docker run`` fail.
+        """
         return [
             Path(match).relative_to(source)
             for pattern in patterns
@@ -74,6 +79,8 @@ class MountPlanner:
         return [BindMount(str(spec_path), f"{CONTAINER_WORKSPACE}/{SPEC_FILENAME}", True)]
 
     def _git_main_mount(self) -> list[BindMount]:
+        # TODO(bulbi): this mounts the main repository's git directory read-write, so the
+        # agent can modify metadata shared by every worktree of that repository.
         git_dir = self._worktree_main_git_dir()
         return [BindMount(str(git_dir), GIT_MAIN_TARGET, False)] if git_dir else []
 
