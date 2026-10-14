@@ -25,6 +25,8 @@ from bulbi.proxy.policy import DomainPolicy
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN_TIMEOUT_SECONDS = 5
+# How often serve_forever checks for shutdown; bounds how long stop() blocks.
+_SHUTDOWN_POLL_SECONDS = 0.1
 _EPHEMERAL_PORT = 0
 
 
@@ -68,7 +70,10 @@ class ProxyServer:
         self._server = ProxyHTTPServer((self._bind_host, port), self._context)
         bound_port: int = self._server.server_address[1]
         self._thread = threading.Thread(
-            target=self._server.serve_forever, name="bulbi-proxy", daemon=True
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": _SHUTDOWN_POLL_SECONDS},
+            name="bulbi-proxy",
+            daemon=True,
         )
         self._thread.start()
         logger.info("Proxy started on %s:%d", self._bind_host, bound_port)
